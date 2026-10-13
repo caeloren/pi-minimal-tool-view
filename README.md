@@ -2,13 +2,13 @@
 
 `@caeloren/pi-minimal-tool-view` provides unified minimal rendering for Pi Agent tool calls. In the interactive terminal, collapsed rows show a compact call preview and, when Pi supplies a result, a status summary. Expanded rows delegate to the downstream renderer selected by Pi, normally the native renderer.
 
-Version: **0.1.2**. Compatibility baseline: **Pi Agent 1.2.0**.
+Version: **0.1.3**. Compatibility baseline: **Pi Agent 1.2.0**.
 
 This package replaces the need to load the official `minimal-mode.ts` example and a separate codemode-only renderer. It does not bundle or modify the official example and never replaces tool execution.
 
 ## Installation
 
-After publishing the four files at the root of the public repository:
+Install from the public GitHub repository:
 
 ```bash
 pi install git:github.com/caeloren/pi-minimal-tool-view
@@ -17,15 +17,15 @@ pi list
 
 If Pi is already running, use `/reload` or restart it after installation, updating, or removal.
 
-After the `v0.1.2` tag exists, an exact release can be installed with:
+After a `v0.1.3` tag is published, that exact release can be installed with:
 
 ```bash
-pi install git:github.com/caeloren/pi-minimal-tool-view@v0.1.2
+pi install git:github.com/caeloren/pi-minimal-tool-view@v0.1.3
 ```
 
-The repository and tag must actually exist. This archive does not publish them. `private: true` prevents accidental npm publication; it does not make a public GitHub repository private or prevent Pi Git installation.
+The unpinned command above installs the repository's current default branch. `private: true` prevents accidental npm publication; it does not make the public GitHub repository private or prevent Pi Git installation.
 
-For local testing, extract the archive and use the absolute package directory:
+For local testing from a downloaded or cloned copy, use the absolute package directory:
 
 ```bash
 pi install /absolute/path/to/pi-minimal-tool-view
@@ -35,9 +35,9 @@ Local sources load from that directory without copying it. Keep it in place unti
 
 ## Migration from Earlier Names
 
-Minimal Tool View is the renamed 0.1.2 distribution previously called Better Minimal Mode and, before that, Minimal Mode Plus. Rendering behavior and the license are unchanged.
+Minimal Tool View is the current package name. Earlier development builds were called Better Minimal Mode and, before that, Minimal Mode Plus.
 
-The intended GitHub source is now `git:github.com/caeloren/pi-minimal-tool-view`. Publish the four package files at that repository root before using its install command. Renaming this archive does not rename a GitHub repository or rewrite an existing Pi package declaration.
+The current public Git source is `git:github.com/caeloren/pi-minimal-tool-view`. Renaming a local archive does not rewrite an existing Pi package declaration.
 
 Use `pi list` to identify any old installation and its exact source, including a tag or local path. Remove only the source actually installed. For an unpinned Git installation, use the corresponding command:
 
@@ -223,6 +223,11 @@ Only one public tool-renderer resolver is registered. The package does not execu
 Small per-row in-memory components and a transient renderer-state marker are used. If a native renderer was expanded during execution and then collapsed, its final result is forwarded off-screen to let that renderer clean up its own transient resources. The package does not manipulate private timer fields or create a timer itself.
 
 Collapsed previews strip terminal escape sequences, replace control and bidirectional formatting characters, and normalize tabs. This is display-only sanitization, **not secret redaction**. Paths, patterns, and the visible command prefix may contain sensitive data, and the full underlying content remains in Pi's normal runtime/session data. Expanded content follows the downstream renderer's own safeguards.
+
+## Changes in 0.1.3
+
+- Keep width-truncation ellipses in the same text style as the truncated preview without clearing Pi's outer tool-row background.
+- Update installation and migration wording for the repository's current public state.
 
 ## Changes in 0.1.2
 

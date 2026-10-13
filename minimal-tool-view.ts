@@ -102,7 +102,17 @@ class MinimalEditResultComponent extends MinimalSelfShellLineComponent {
 function renderSingleLine(text: string, width: number): string[] {
 	if (!text || !Number.isFinite(width) || width <= 0) return [];
 	const safeWidth = Math.floor(width);
-	const displayed = truncateToWidth(text.replace(/\t/g, "   "), safeWidth, "...");
+	const normalized = text.replace(/\t/g, "   ");
+	const truncated = visibleWidth(normalized) > safeWidth;
+	let displayed = truncateToWidth(normalized, safeWidth, "...");
+
+	if (truncated) {
+		// Pi wraps its generated ellipsis in full SGR resets. Rewrite only that final wrapper so the
+		// ellipsis inherits the style active at the truncation point while the outer tool-row background
+		// remains intact. Preserve any earlier resets that belong to independently styled call segments.
+		displayed = displayed.replace(/\x1b\[0m(\.{1,3})\x1b\[0m$/, "$1\x1b[22;39m");
+	}
+
 	const padding = Math.max(0, safeWidth - visibleWidth(displayed));
 	return [`${displayed}${" ".repeat(padding)}`];
 }
