@@ -1,0 +1,35 @@
+{
+  "name": "@caeloren/pi-minimal-tool-view",
+  "version": "0.1.2",
+  "description": "Unified minimal rendering for Pi Agent's file, search, shell, and codemode tools.",
+  "private": true,
+  "type": "module",
+  "license": "SUL-1.0",
+  "author": "caeloren",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/caeloren/pi-minimal-tool-view.git"
+  },
+  "homepage": "https://github.com/caeloren/pi-minimal-tool-view#readme",
+  "bugs": {
+    "url": "https://github.com/caeloren/pi-minimal-tool-view/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-agent",
+    "pi-extension",
+    "minimal-mode",
+    "codemode",
+    "bash",
+    "powershell"
+  ],
+  "pi": {
+    "extensions": [
+      "./minimal-tool-view.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}
