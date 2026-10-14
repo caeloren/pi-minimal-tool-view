@@ -8,7 +8,7 @@
 
 https://github.com/user-attachments/assets/b7fbd71c-fc77-45b7-8d63-8b074c5828e8
 
-Version: **0.1.4**  
+Version: **0.2.2**  
 Compatibility baseline: **Pi Agent 1.2.0**
 
 Supported tool names:
@@ -23,6 +23,7 @@ find
 grep
 ls
 codemode
+tool_search
 ```
 
 The extension changes rendering only. It does not execute or replace tools, modify tool arguments or results, alter prompts or sessions, access files or the network, or persist package-owned user data.
@@ -38,17 +39,17 @@ pi list
 
 If Pi is already running, use `/reload` or restart Pi after installation.
 
-> **Important:** Do not load this package together with the official `minimal-mode.ts`, the older `pi-minimal-codemode` package, another copy of Minimal Tool View, or another renderer for the same tool names. Remove overlapping extensions and run `/reload`.
+> **Important:** Do not load this package together with the official `minimal-mode.ts`, another copy of Minimal Tool View, or any extension that renders the same tool names. Remove overlapping extensions and run `/reload`.
 
 ### Enable optional tools
 
-This package changes rendering only; it does not enable `codemode` or `powershell`. Merge the required entries into your existing `defaultTools` setting without removing unrelated entries.
+This package changes rendering only; it does not enable `codemode`, `tool_search`, or `powershell`. Merge the required entries into your existing `defaultTools` setting without removing unrelated entries.
 
-Enable Codemode:
+Enable Codemode and tool discovery:
 
 ```json
 {
-  "defaultTools": ["+codemode"]
+  "defaultTools": ["+codemode", "+tool_search"]
 }
 ```
 
@@ -85,13 +86,16 @@ edit src/index.ts
 
 codemode
 → completed · 4 calls · 1 failed · 1 cancelled · 1.8s
+
+tool_search github issues
+→ completed · 3 tools loaded · 97ms
 ```
 
-Short single-line Bash and PowerShell commands are shown in full. Multiline or overlong commands are truncated with `...`. Partial results show `running`; successful final results show `completed`; error results show `failed`.
+Bash and PowerShell previews show the first meaningful line. Additional nonblank lines or insufficient display width add `...`. Before Pi supplies a result, only the call preview is shown. Partial results show `running`; successful final results show `completed`; error results show `failed`. Final durations are included when Pi supplies valid values.
 
-`find`, `grep`, and `ls` show compact argument previews but do not guess result totals. Codemode call counts are shown only when Pi supplies complete, valid structured call data.
+`find`, `grep`, and `ls` show compact argument previews but do not guess result totals. Codemode call counts are shown only when Pi supplies complete, valid structured call data. `tool_search` shows a single-line query preview and counts tools from valid `details.loaded` data in successful final results. Zero matches is a successful `0 tools loaded`; missing, malformed, or duplicate data omits the count. Searching and loading tools remain entirely Pi's responsibility.
 
-Use Pi's normal expand action, **Control + O** by default, to view the downstream renderer's full command, output, diff, source, nested calls, and errors.
+Use Pi's normal expand action, **Control + O** by default, to view details through the downstream renderer, subject to Pi's normal display and truncation limits. In the interactive terminal, `tool_search` uses Pi's generic expanded view for the query and loaded-tool list.
 
 ### Update and remove
 
@@ -117,7 +121,7 @@ pi uninstall git:github.com/caeloren/pi-minimal-tool-view
 
 ## Notes and limitations
 
-- Only the nine exact tool names listed above are handled. Other tools, including `tool_search`, MCP tools, and typical third-party tools, pass through unchanged.
+- Only the ten exact tool names listed above are minimized, regardless of how they are discovered. Other tool names pass through unchanged. A third-party extension using one of these names overlaps with this package.
 - User-entered `!command` and `!!command`, ordinary dollar-prefixed text, code blocks, and thinking content are not Bash tool calls and are not modified.
 - Collapsed running rows do not show a live elapsed timer because Pi supplies `durationMs` only for final results. Pi also does not expose a distinct top-level cancellation flag, so a cancellation reported as an error appears as `failed`.
 - Inline images and HTML exports are handled partly by Pi outside this renderer, so their collapsed and expanded presentation may differ from the interactive terminal.

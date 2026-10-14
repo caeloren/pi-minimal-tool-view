@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: SUL-1.0
 // Copyright (c) 2026 caeloren
 
-import type { ExtensionAPI, ToolRenderers } from "@earendil-works/pi-coding-agent";
-import { type Component, stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { type ExtensionAPI, ToolExecutionComponent, type ToolRenderers } from "@earendil-works/pi-coding-agent";
+import { type Component, getCapabilities, stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 const SUPPORTED_TOOL_NAMES = new Set([
 	"read",
@@ -14,6 +14,7 @@ const SUPPORTED_TOOL_NAMES = new Set([
 	"grep",
 	"ls",
 	"codemode",
+	"tool_search",
 ] as const);
 
 const CODEMODE_STATUSES = new Set(["running", "ok", "error", "cancelled"] as const);
@@ -22,6 +23,7 @@ const EDIT_CALL_COMPONENT = Symbol("minimal-tool-view.edit-call-component");
 
 type RenderCall = NonNullable<ToolRenderers["renderCall"]>;
 type RenderResult = NonNullable<ToolRenderers["renderResult"]>;
+type CompleteToolRenderers = ToolRenderers & { renderCall: RenderCall; renderResult: RenderResult };
 type Theme = Parameters<RenderCall>[1];
 type RenderContext = Parameters<RenderCall>[2];
 type ToolResult = Parameters<RenderResult>[0];
@@ -215,6 +217,12 @@ function formatCall(toolName: SupportedToolName, args: unknown, theme: Theme, co
 			return formatShellCall(args, "PS>", theme, context);
 		case "codemode":
 			return theme.fg("toolTitle", theme.bold("codemode"));
+		case "tool_search": {
+			const query = !context.argsComplete && context.isPartial ? "..." : compactOneLine(stringArg(args, "query") ?? "") || "...";
+			const limit = numberArg(args, "limit");
+			const suffix = limit === undefined ? "" : theme.fg("muted", ` (limit ${limit})`);
+			return `${theme.fg("toolTitle", theme.bold("tool_search"))} ${theme.fg("accent", query)}${suffix}`;
+		}
 		case "read": {
 			const path = displayPath(args);
 			let range = "";
@@ -284,6 +292,16 @@ function codemodeSummary(details: unknown, allowRunning: boolean): CodemodeSumma
 	return { total: details.calls.length, failed, cancelled };
 }
 
+function loadedToolCount(details: unknown): number | undefined {
+	if (!isRecord(details) || !Array.isArray(details.loaded)) return undefined;
+	const names = new Set<string>();
+	for (const name of details.loaded) {
+		if (typeof name !== "string" || !name.trim() || names.has(name)) return undefined;
+		names.add(name);
+	}
+	return names.size;
+}
+
 function styleStatus(options: ToolResultOptions, context: RenderContext, theme: Theme): string {
 	if (options.isPartial) return theme.fg("warning", "running");
 	if (context.isError) return theme.fg("error", "failed");
@@ -309,6 +327,11 @@ function formatResult(
 		}
 	}
 
+	if (toolName === "tool_search" && !options.isPartial && !context.isError) {
+		const count = loadedToolCount(result.details);
+		if (count !== undefined) text += theme.fg("muted", ` · ${count} ${plural(count, "tool")} loaded`);
+	}
+
 	const duration = options.isPartial ? undefined : formatDuration(context.durationMs);
 	if (duration) text += theme.fg("dim", ` · ${duration}`);
 	return text;
@@ -324,13 +347,23 @@ function statusBackground(theme: Theme, status: MinimalVisualStatus): Background
 	return (text: string) => theme.bg(token, text);
 }
 
+// Keep plugin-owned fields isolated in Pi's per-row state; never replace downstream state.
+interface MinimalRendererState {
+	[NATIVE_RENDERER_TOUCHED]?: boolean;
+	[EDIT_CALL_COMPONENT]?: MinimalEditCallComponent;
+}
+
+function rendererState(context: RenderContext): MinimalRendererState | undefined {
+	return isRecord(context.state) ? (context.state as MinimalRendererState) : undefined;
+}
+
 function nativeRendererWasTouched(context: RenderContext): boolean {
-	return isRecord(context.state) && (context.state as { [NATIVE_RENDERER_TOUCHED]?: boolean })[NATIVE_RENDERER_TOUCHED] === true;
+	return rendererState(context)?.[NATIVE_RENDERER_TOUCHED] === true;
 }
 
 function setNativeRendererTouched(context: RenderContext, touched: boolean): void {
-	if (!isRecord(context.state)) return;
-	(context.state as { [NATIVE_RENDERER_TOUCHED]?: boolean })[NATIVE_RENDERER_TOUCHED] = touched;
+	const state = rendererState(context);
+	if (state) state[NATIVE_RENDERER_TOUCHED] = touched;
 }
 
 function contextForNative<T extends { lastComponent: Component | undefined }>(context: T): T {
@@ -345,18 +378,105 @@ function contextForNative<T extends { lastComponent: Component | undefined }>(co
 	return { ...context, lastComponent: undefined };
 }
 
+const EMPTY_COMPONENT: Component = { render: () => [], invalidate() {} };
+
+// Pi 1.2.0's tool_search has no specialized renderers. Compose its public tool component to reuse
+// Pi's generic expanded argument/result formatting instead of copying private fallback helpers.
+class ToolSearchFallbackComponent implements Component {
+	private readonly view: ToolExecutionComponent;
+
+	constructor(readonly slot: "call" | "result", args: unknown, context: RenderContext) {
+		const renderers: ToolRenderers = { renderShell: "self" };
+		if (slot === "result") renderers.renderCall = () => EMPTY_COMPONENT;
+		// The public tool component only needs requestRender from this UI argument. Route it to the
+		// owning row's public invalidation callback; never start another TUI or access its internals.
+		const ui = { requestRender: context.invalidate } as ConstructorParameters<typeof ToolExecutionComponent>[5];
+		this.view = new ToolExecutionComponent("tool_search", context.toolCallId, args, {
+			showImages: false,
+			outputPad: 0,
+		}, renderers, ui, context.cwd);
+		this.view.setExpanded(true);
+	}
+
+	updateArgs(args: unknown): void {
+		this.view.updateArgs(args);
+	}
+
+	updateResult(result: ToolResult, options: ToolResultOptions, context: RenderContext): void {
+		// The outer Pi row already owns inline images. Exclude them only from this display-only copy
+		// when they are shown inline; otherwise let Pi's generic fallback show its image indicators.
+		const content = context.showImages && getCapabilities().images
+			? result.content.filter((block) => block.type !== "image")
+			: result.content;
+		this.view.updateResult({ content, details: result.details, isError: context.isError }, options.isPartial);
+	}
+
+	invalidate(): void {
+		this.view.invalidate();
+	}
+
+	render(width: number): string[] {
+		const lines = this.view.render(width);
+		// The outer row supplies the tool-to-tool separator. Remove only an empty first line from
+		// the public component output; never trim the argument or result content itself.
+		return lines[0] === "" ? lines.slice(1) : lines;
+	}
+}
+
+function toolSearchFallback(slot: "call" | "result", args: unknown, context: RenderContext): ToolSearchFallbackComponent {
+	const previous = context.lastComponent;
+	if (previous instanceof ToolSearchFallbackComponent && previous.slot === slot) {
+		// Only the call slot displays arguments. Updating a result slot's arguments would redraw its
+		// old result immediately before updateResult draws the new one.
+		if (slot === "call") previous.updateArgs(args);
+		return previous;
+	}
+	// The native constructor already initializes the arguments; do not update them a second time.
+	return new ToolSearchFallbackComponent(slot, args, context);
+}
+
+function hasCompleteRenderers(renderers: ToolRenderers): renderers is CompleteToolRenderers {
+	return typeof renderers.renderCall === "function" && typeof renderers.renderResult === "function";
+}
+
+function prepareDownstreamRenderers(
+	toolName: SupportedToolName,
+	native: ToolRenderers,
+): CompleteToolRenderers | undefined {
+	if (toolName === "tool_search") {
+		// Do not guess how an unrelated self-framed replacement should be composed.
+		if (native.renderShell === "self") return undefined;
+		if (!native.renderCall && !native.renderResult) {
+			return {
+				...native,
+				renderCall(args, _theme, context) {
+					return toolSearchFallback("call", args, context);
+				},
+				renderResult(result, options, _theme, context) {
+					const component = toolSearchFallback("result", context.args, context);
+					component.updateResult(result, options, context);
+					return component;
+				},
+			};
+		}
+	}
+	return hasCompleteRenderers(native) ? native : undefined;
+}
+
 export function createMinimalToolViewRenderers(toolName: SupportedToolName, native: ToolRenderers): ToolRenderers {
-	if (!native.renderCall || !native.renderResult) return native;
-	const selfFramedEdit = toolName === "edit" && native.renderShell === "self";
+	const downstream = prepareDownstreamRenderers(toolName, native);
+	if (!downstream) return native;
+	const selfFramedEdit = toolName === "edit" && downstream.renderShell === "self";
 
 	return {
-		...native,
+		...downstream,
 		renderCall(args, theme, context) {
 			if (context.expanded) {
-				if (selfFramedEdit && isRecord(context.state)) {
-					delete (context.state as { [EDIT_CALL_COMPONENT]?: MinimalEditCallComponent })[EDIT_CALL_COMPONENT];
+				if (selfFramedEdit) {
+					const state = rendererState(context);
+					if (state) delete state[EDIT_CALL_COMPONENT];
 				}
-				const component = native.renderCall!(args, theme, contextForNative(context));
+				const component = downstream.renderCall(args, theme, contextForNative(context));
 				setNativeRendererTouched(context, true);
 				return component;
 			}
@@ -368,9 +488,8 @@ export function createMinimalToolViewRenderers(toolName: SupportedToolName, nati
 				// Keep both margins until Pi supplies a result. Its call/result callbacks share row state;
 				// renderResult transfers the bottom margin before the components are drawn.
 				component.setBottomPadding(1);
-				if (isRecord(context.state)) {
-					(context.state as { [EDIT_CALL_COMPONENT]?: MinimalEditCallComponent })[EDIT_CALL_COMPONENT] = component;
-				}
+				const state = rendererState(context);
+				if (state) state[EDIT_CALL_COMPONENT] = component;
 				component.setContent(
 					formatCall(toolName, args, theme, context),
 					context.outputPad,
@@ -386,7 +505,7 @@ export function createMinimalToolViewRenderers(toolName: SupportedToolName, nati
 		},
 		renderResult(result, options, theme, context) {
 			if (options.expanded) {
-				const component = native.renderResult!(result, options, theme, contextForNative(context));
+				const component = downstream.renderResult(result, options, theme, contextForNative(context));
 				setNativeRendererTouched(context, options.isPartial && !context.isError);
 				return component;
 			}
@@ -396,7 +515,7 @@ export function createMinimalToolViewRenderers(toolName: SupportedToolName, nati
 			// the native renderer can release its own transient resources.
 			if ((!options.isPartial || context.isError) && nativeRendererWasTouched(context)) {
 				try {
-					native.renderResult!(result, options, theme, contextForNative(context));
+					downstream.renderResult(result, options, theme, contextForNative(context));
 				} catch {
 					// Cleanup delegation must never replace the minimal result with a renderer failure.
 				} finally {
@@ -406,8 +525,8 @@ export function createMinimalToolViewRenderers(toolName: SupportedToolName, nati
 
 			const resultText = formatResult(toolName, result, options, theme, context);
 			if (selfFramedEdit) {
-				if (isRecord(context.state)) {
-					const state = context.state as { [EDIT_CALL_COMPONENT]?: MinimalEditCallComponent };
+				const state = rendererState(context);
+				if (state) {
 					const call = state[EDIT_CALL_COMPONENT];
 					if (call instanceof MinimalEditCallComponent) call.setBottomPadding(0);
 					delete state[EDIT_CALL_COMPONENT];
