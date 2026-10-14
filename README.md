@@ -4,7 +4,7 @@
 
 `@caeloren/pi-minimal-tool-view` provides compact collapsed views for Pi Agent tool calls while preserving Pi's downstream, normally native, expanded views.
 
-Version: **0.1.3**  
+Version: **0.1.4**  
 Compatibility baseline: **Pi Agent 1.2.0**
 
 Supported tool names:

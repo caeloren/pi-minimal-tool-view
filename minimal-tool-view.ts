@@ -18,6 +18,7 @@ const SUPPORTED_TOOL_NAMES = new Set([
 
 const CODEMODE_STATUSES = new Set(["running", "ok", "error", "cancelled"] as const);
 const NATIVE_RENDERER_TOUCHED = Symbol("minimal-tool-view.native-renderer-touched");
+const EDIT_CALL_COMPONENT = Symbol("minimal-tool-view.edit-call-component");
 
 type RenderCall = NonNullable<ToolRenderers["renderCall"]>;
 type RenderResult = NonNullable<ToolRenderers["renderResult"]>;
@@ -58,8 +59,12 @@ class MinimalSelfShellLineComponent implements Component {
 
 	constructor(
 		private readonly paddingTop: number,
-		private readonly paddingBottom: number,
+		private paddingBottom: number,
 	) {}
+
+	setBottomPadding(padding: 0 | 1): void {
+		this.paddingBottom = padding;
+	}
 
 	setContent(text: string, outputPad: number, bgFn: BackgroundFn): void {
 		this.text = text;
@@ -89,7 +94,7 @@ class MinimalSelfShellLineComponent implements Component {
 
 class MinimalEditCallComponent extends MinimalSelfShellLineComponent {
 	constructor() {
-		super(1, 0);
+		super(1, 1);
 	}
 }
 
@@ -342,20 +347,30 @@ function contextForNative<T extends { lastComponent: Component | undefined }>(co
 
 export function createMinimalToolViewRenderers(toolName: SupportedToolName, native: ToolRenderers): ToolRenderers {
 	if (!native.renderCall || !native.renderResult) return native;
+	const selfFramedEdit = toolName === "edit" && native.renderShell === "self";
 
 	return {
 		...native,
 		renderCall(args, theme, context) {
 			if (context.expanded) {
+				if (selfFramedEdit && isRecord(context.state)) {
+					delete (context.state as { [EDIT_CALL_COMPONENT]?: MinimalEditCallComponent })[EDIT_CALL_COMPONENT];
+				}
 				const component = native.renderCall!(args, theme, contextForNative(context));
 				setNativeRendererTouched(context, true);
 				return component;
 			}
-			if (toolName === "edit") {
+			if (selfFramedEdit) {
 				const component =
 					context.lastComponent instanceof MinimalEditCallComponent
 						? context.lastComponent
 						: new MinimalEditCallComponent();
+				// Keep both margins until Pi supplies a result. Its call/result callbacks share row state;
+				// renderResult transfers the bottom margin before the components are drawn.
+				component.setBottomPadding(1);
+				if (isRecord(context.state)) {
+					(context.state as { [EDIT_CALL_COMPONENT]?: MinimalEditCallComponent })[EDIT_CALL_COMPONENT] = component;
+				}
 				component.setContent(
 					formatCall(toolName, args, theme, context),
 					context.outputPad,
@@ -390,7 +405,13 @@ export function createMinimalToolViewRenderers(toolName: SupportedToolName, nati
 			}
 
 			const resultText = formatResult(toolName, result, options, theme, context);
-			if (toolName === "edit") {
+			if (selfFramedEdit) {
+				if (isRecord(context.state)) {
+					const state = context.state as { [EDIT_CALL_COMPONENT]?: MinimalEditCallComponent };
+					const call = state[EDIT_CALL_COMPONENT];
+					if (call instanceof MinimalEditCallComponent) call.setBottomPadding(0);
+					delete state[EDIT_CALL_COMPONENT];
+				}
 				const component =
 					context.lastComponent instanceof MinimalEditResultComponent
 						? context.lastComponent
