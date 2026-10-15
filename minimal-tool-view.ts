@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: SUL-1.0
 // Copyright (c) 2026 caeloren
 
+import { homedir } from "node:os";
+import { isAbsolute, join, resolve, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { type ExtensionAPI, ToolExecutionComponent, type ToolRenderers } from "@earendil-works/pi-coding-agent";
-import { type Component, getCapabilities, stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { type Component, getCapabilities, hyperlink, stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 const SUPPORTED_TOOL_NAMES = new Set([
 	"read",
@@ -20,6 +23,7 @@ const SUPPORTED_TOOL_NAMES = new Set([
 const CODEMODE_STATUSES = new Set(["running", "ok", "error", "cancelled"] as const);
 const NATIVE_RENDERER_TOUCHED = Symbol("minimal-tool-view.native-renderer-touched");
 const EDIT_CALL_COMPONENT = Symbol("minimal-tool-view.edit-call-component");
+const WRITE_LINE_COUNT = Symbol("minimal-tool-view.write-line-count");
 
 type RenderCall = NonNullable<ToolRenderers["renderCall"]>;
 type RenderResult = NonNullable<ToolRenderers["renderResult"]>;
@@ -110,10 +114,9 @@ function renderSingleLine(text: string, width: number): string[] {
 	if (!text || !Number.isFinite(width) || width <= 0) return [];
 	const safeWidth = Math.floor(width);
 	const normalized = text.replace(/\t/g, "   ");
-	const truncated = visibleWidth(normalized) > safeWidth;
 	let displayed = truncateToWidth(normalized, safeWidth, "...");
 
-	if (truncated) {
+	if (displayed !== normalized) {
 		// Pi wraps its generated ellipsis in full SGR resets. Rewrite only that final wrapper so the
 		// ellipsis inherits the style active at the truncation point while the outer tool-row background
 		// remains intact. Preserve any earlier resets that belong to independently styled call segments.
@@ -156,20 +159,68 @@ function compactOneLine(value: string): string {
 		.trim();
 }
 
-function countTextLines(value: string): number {
-	if (value.length === 0) return 0;
-	const normalized = value.replace(/\r\n?/g, "\n");
-	let count = 0;
-	for (const character of normalized) {
-		if (character === "\n") count += 1;
+interface WriteLineCount {
+	content: string;
+	breaks: number;
+}
+
+function countTextLines(value: string | undefined, context: RenderContext): number {
+	const state = rendererState(context);
+	if (!value) {
+		if (state) delete state[WRITE_LINE_COUNT];
+		return 0;
 	}
-	return normalized.endsWith("\n") ? count : count + 1;
+
+	const previous = state?.[WRITE_LINE_COUNT];
+	const last = value.charCodeAt(value.length - 1);
+	const finalLine = last === 10 || last === 13 ? 0 : 1;
+	if (previous?.content === value) return previous.breaks + finalLine;
+	let breaks = 0;
+	let start = 0;
+	// Compare the entire prefix, not just lengths. Replacements and shrinking inputs must recount.
+	// Retain only the current immutable string reference and its break count for this tool row.
+	if (previous && value.length > previous.content.length && value.slice(0, previous.content.length) === previous.content) {
+		breaks = previous.breaks;
+		start = previous.content.length;
+	}
+	for (let i = start; i < value.length; i++) {
+		const code = value.charCodeAt(i);
+		// Looking one code unit back also handles CRLF split across two argument updates.
+		if (code === 13 || (code === 10 && (i === 0 || value.charCodeAt(i - 1) !== 13))) breaks++;
+	}
+	if (state) state[WRITE_LINE_COUNT] = { content: value, breaks };
+	return breaks + finalLine;
 }
 
 function displayPath(args: unknown, fallback = "..."): string {
 	const path = stringArg(args, "file_path", "path");
 	if (path === undefined) return fallback;
 	return compactOneLine(path) || fallback;
+}
+
+// Match Pi's native link-path normalization without probing the filesystem or importing private helpers.
+function normalizeLinkPath(value: string): string {
+	if (sep === "\\" && value.startsWith("/") && !value.startsWith("//") && !value.includes("\\")) {
+		const drive = /^\/(?:mnt\/|cygdrive\/)?([a-z])(?:\/(.*))?$/i.exec(value);
+		if (drive?.[1]) value = `${drive[1].toUpperCase()}:\\${(drive[2] ?? "").replaceAll("/", "\\")}`;
+	}
+	if (value === "~") return homedir();
+	if (value.startsWith("~/") || (sep === "\\" && value.startsWith("~\\"))) return join(homedir(), value.slice(2));
+	return value.startsWith("file://") ? fileURLToPath(value) : value;
+}
+
+function formatLinkedPath(args: unknown, theme: Theme, context: RenderContext, fallback = "..."): string {
+	const text = theme.fg("accent", displayPath(args, fallback));
+	const raw = stringArg(args, "file_path", "path") ?? (fallback === "." ? "." : undefined);
+	if (!getCapabilities().hyperlinks || raw === undefined || raw.trim() === "") return text;
+	try {
+		const path = normalizeLinkPath(raw);
+		const absolute = isAbsolute(path) ? resolve(path) : resolve(normalizeLinkPath(context.cwd), path);
+		return hyperlink(text, pathToFileURL(absolute).href);
+	} catch {
+		// Invalid path/URL input must not prevent the call or its error result from being displayed.
+		return text;
+	}
 }
 
 function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
@@ -187,44 +238,34 @@ function formatDuration(durationMs: number | undefined): string | undefined {
 	return `${Math.floor(minutes / 60)}h ${minutes % 60}m ${seconds}s`;
 }
 
-function formatShellCall(args: unknown, prompt: "$" | "PS>", theme: Theme, context: RenderContext): string {
-	// Before a final result, incomplete arguments must not be presented as a complete command.
-	// Restored final rows may leave argsComplete false, including failures without durationMs.
-	// Use the explicit partial-result state, never error status or duration, to select the placeholder.
-	if (!context.argsComplete && context.isPartial) {
-		return theme.fg("toolTitle", theme.bold(`${prompt} ...`));
-	}
-
-	const command = stringArg(args, "command");
-	if (command === undefined) {
-		return `${theme.fg("toolTitle", theme.bold(prompt))} ${theme.fg("error", "[invalid command]")}`;
-	}
-
-	const normalized = sanitizeDisplayText(command).replace(/\r\n?/g, "\n").trimStart();
+function formatShellCall(args: unknown, prompt: "$" | "PS>", theme: Theme): string {
+	// Preview available text even while arguments stream or a saved call has no result.
+	const normalized = sanitizeDisplayText(stringArg(args, "command") ?? "").replace(/\r\n?/g, "\n").trimStart();
 	const newline = normalized.indexOf("\n");
 	const firstLine = (newline === -1 ? normalized : normalized.slice(0, newline)).trimEnd();
 	const hasAdditionalContent = newline !== -1 && /\S/.test(normalized.slice(newline + 1));
-	const preview = firstLine || "...";
-	const suffix = hasAdditionalContent ? " ..." : "";
-	return theme.fg("toolTitle", theme.bold(`${prompt} ${preview}${suffix}`));
+	const preview = firstLine ? ` ${firstLine}${hasAdditionalContent ? " ..." : ""}` : "";
+	return theme.fg("toolTitle", theme.bold(`${prompt}${preview}`));
 }
 
 function formatCall(toolName: SupportedToolName, args: unknown, theme: Theme, context: RenderContext): string {
 	switch (toolName) {
 		case "bash":
-			return formatShellCall(args, "$", theme, context);
+			return formatShellCall(args, "$", theme);
 		case "powershell":
-			return formatShellCall(args, "PS>", theme, context);
+			return formatShellCall(args, "PS>", theme);
 		case "codemode":
 			return theme.fg("toolTitle", theme.bold("codemode"));
 		case "tool_search": {
-			const query = !context.argsComplete && context.isPartial ? "..." : compactOneLine(stringArg(args, "query") ?? "") || "...";
+			const query = compactOneLine(stringArg(args, "query") ?? "");
+			const title = theme.fg("toolTitle", theme.bold("tool_search"));
+			if (!query) return title;
 			const limit = numberArg(args, "limit");
 			const suffix = limit === undefined ? "" : theme.fg("muted", ` (limit ${limit})`);
-			return `${theme.fg("toolTitle", theme.bold("tool_search"))} ${theme.fg("accent", query)}${suffix}`;
+			return `${title} ${theme.fg("accent", query)}${suffix}`;
 		}
 		case "read": {
-			const path = displayPath(args);
+			const path = formatLinkedPath(args, theme, context);
 			let range = "";
 			const offset = numberArg(args, "offset");
 			const limit = numberArg(args, "limit");
@@ -233,17 +274,17 @@ function formatCall(toolName: SupportedToolName, args: unknown, theme: Theme, co
 				const end = limit !== undefined ? start + limit - 1 : undefined;
 				range = theme.fg("warning", `:${start}${end !== undefined ? `-${end}` : ""}`);
 			}
-			return `${theme.fg("toolTitle", theme.bold("read"))} ${theme.fg("accent", path)}${range}`;
+			return `${theme.fg("toolTitle", theme.bold("read"))} ${path}${range}`;
 		}
 		case "write": {
-			const path = displayPath(args);
+			const path = formatLinkedPath(args, theme, context);
 			const content = stringArg(args, "content");
-			const lineCount = content === undefined ? 0 : countTextLines(content);
+			const lineCount = countTextLines(content, context);
 			const lineInfo = lineCount > 0 ? theme.fg("muted", ` (${lineCount} ${plural(lineCount, "line")})`) : "";
-			return `${theme.fg("toolTitle", theme.bold("write"))} ${theme.fg("accent", path)}${lineInfo}`;
+			return `${theme.fg("toolTitle", theme.bold("write"))} ${path}${lineInfo}`;
 		}
 		case "edit":
-			return `${theme.fg("toolTitle", theme.bold("edit"))} ${theme.fg("accent", displayPath(args))}`;
+			return `${theme.fg("toolTitle", theme.bold("edit"))} ${formatLinkedPath(args, theme, context)}`;
 		case "find": {
 			const pattern = compactOneLine(stringArg(args, "pattern") ?? "") || "...";
 			const path = displayPath(args, ".");
@@ -261,10 +302,10 @@ function formatCall(toolName: SupportedToolName, args: unknown, theme: Theme, co
 			return `${theme.fg("toolTitle", theme.bold("grep"))} ${theme.fg("accent", `/${pattern}/`)}${theme.fg("toolOutput", ` in ${path}`)}${suffix}`;
 		}
 		case "ls": {
-			const path = displayPath(args, ".");
+			const path = formatLinkedPath(args, theme, context, ".");
 			const limit = numberArg(args, "limit");
 			const suffix = limit === undefined ? "" : theme.fg("muted", ` (limit ${limit})`);
-			return `${theme.fg("toolTitle", theme.bold("ls"))} ${theme.fg("accent", path)}${suffix}`;
+			return `${theme.fg("toolTitle", theme.bold("ls"))} ${path}${suffix}`;
 		}
 	}
 }
@@ -351,6 +392,7 @@ function statusBackground(theme: Theme, status: MinimalVisualStatus): Background
 interface MinimalRendererState {
 	[NATIVE_RENDERER_TOUCHED]?: boolean;
 	[EDIT_CALL_COMPONENT]?: MinimalEditCallComponent;
+	[WRITE_LINE_COUNT]?: WriteLineCount;
 }
 
 function rendererState(context: RenderContext): MinimalRendererState | undefined {
@@ -472,6 +514,10 @@ export function createMinimalToolViewRenderers(toolName: SupportedToolName, nati
 		...downstream,
 		renderCall(args, theme, context) {
 			if (context.expanded) {
+				if (toolName === "write") {
+					const state = rendererState(context);
+					if (state) delete state[WRITE_LINE_COUNT];
+				}
 				if (selfFramedEdit) {
 					const state = rendererState(context);
 					if (state) delete state[EDIT_CALL_COMPONENT];

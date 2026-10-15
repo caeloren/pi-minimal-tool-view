@@ -8,7 +8,7 @@
 
 https://github.com/user-attachments/assets/b7fbd71c-fc77-45b7-8d63-8b074c5828e8
 
-Version: **0.2.2**  
+Version: **0.3.1**  
 Compatibility baseline: **Pi Agent 1.2.0**
 
 Supported tool names:
@@ -91,7 +91,11 @@ tool_search github issues
 → completed · 3 tools loaded · 97ms
 ```
 
-Bash and PowerShell previews show the first meaningful line. Additional nonblank lines or insufficient display width add `...`. Before Pi supplies a result, only the call preview is shown. Partial results show `running`; successful final results show `completed`; error results show `failed`. Final durations are included when Pi supplies valid values.
+Bash, PowerShell, and `tool_search` show available command or query text as arguments stream. Before any text arrives, only `$`, `PS>`, or `tool_search` is shown. Saved calls without a result still show their saved text; this does not indicate completion or restart execution. Bash and PowerShell previews show the first meaningful line. Additional nonblank lines or insufficient display width add `...`; it is not an input-progress marker.
+
+Before Pi supplies a result, only the call preview is shown. Partial results show `running`; successful final results show `completed`; error results show `failed`. Final durations are included when Pi supplies valid values.
+
+`read`, `write`, `edit`, and `ls` path previews are clickable when Pi detects terminal hyperlink support. Links target the full path even when the visible label is truncated; opening behavior and click gestures depend on the terminal. Other environments keep plain text. `write` line counts are derived from the supplied content.
 
 `find`, `grep`, and `ls` show compact argument previews but do not guess result totals. Codemode call counts are shown only when Pi supplies complete, valid structured call data. `tool_search` shows a single-line query preview and counts tools from valid `details.loaded` data in successful final results. Zero matches is a successful `0 tools loaded`; missing, malformed, or duplicate data omits the count. Searching and loading tools remain entirely Pi's responsibility.
 
