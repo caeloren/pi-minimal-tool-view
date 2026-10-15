@@ -8,7 +8,7 @@
 
 https://github.com/user-attachments/assets/b7fbd71c-fc77-45b7-8d63-8b074c5828e8
 
-Version: **0.3.1**  
+Version: **0.3.2**  
 Compatibility baseline: **Pi Agent 1.2.0**
 
 Supported tool names:
@@ -91,7 +91,9 @@ tool_search github issues
 → completed · 3 tools loaded · 97ms
 ```
 
-Bash, PowerShell, and `tool_search` show available command or query text as arguments stream. Before any text arrives, only `$`, `PS>`, or `tool_search` is shown. Saved calls without a result still show their saved text; this does not indicate completion or restart execution. Bash and PowerShell previews show the first meaningful line. Additional nonblank lines or insufficient display width add `...`; it is not an input-progress marker.
+All supported collapsed previews show their available command, path, pattern, query, and optional argument fields as Pi supplies them. Missing or blank fields stay empty; only the tool name or shell prompt remains when no preview fields are available. No placeholders or inferred paths are added, including `.` for an omitted directory. A literal `.` supplied as a path is still shown. Saved calls without a result retain their saved preview without indicating completion or restarting execution.
+
+Bash and PowerShell previews show the first meaningful line. Generated `...` only indicates omitted content: insufficient display width, or additional nonblank command lines. It never indicates missing input or streaming progress. Other text fields are compacted to one line and truncated only when needed. Codemode source and edit bodies remain hidden until expanded.
 
 Before Pi supplies a result, only the call preview is shown. Partial results show `running`; successful final results show `completed`; error results show `failed`. Final durations are included when Pi supplies valid values.
 

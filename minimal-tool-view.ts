@@ -192,10 +192,8 @@ function countTextLines(value: string | undefined, context: RenderContext): numb
 	return breaks + finalLine;
 }
 
-function displayPath(args: unknown, fallback = "..."): string {
-	const path = stringArg(args, "file_path", "path");
-	if (path === undefined) return fallback;
-	return compactOneLine(path) || fallback;
+function displayPath(args: unknown): string {
+	return compactOneLine(stringArg(args, "file_path", "path") ?? "");
 }
 
 // Match Pi's native link-path normalization without probing the filesystem or importing private helpers.
@@ -209,9 +207,11 @@ function normalizeLinkPath(value: string): string {
 	return value.startsWith("file://") ? fileURLToPath(value) : value;
 }
 
-function formatLinkedPath(args: unknown, theme: Theme, context: RenderContext, fallback = "..."): string {
-	const text = theme.fg("accent", displayPath(args, fallback));
-	const raw = stringArg(args, "file_path", "path") ?? (fallback === "." ? "." : undefined);
+function formatLinkedPath(args: unknown, theme: Theme, context: RenderContext): string {
+	const label = displayPath(args);
+	if (!label) return "";
+	const text = theme.fg("accent", label);
+	const raw = stringArg(args, "file_path", "path");
 	if (!getCapabilities().hyperlinks || raw === undefined || raw.trim() === "") return text;
 	try {
 		const path = normalizeLinkPath(raw);
@@ -248,6 +248,7 @@ function formatShellCall(args: unknown, prompt: "$" | "PS>", theme: Theme): stri
 	return theme.fg("toolTitle", theme.bold(`${prompt}${preview}`));
 }
 
+// Show only supplied preview fields. Missing fields have no placeholder or inferred path.
 function formatCall(toolName: SupportedToolName, args: unknown, theme: Theme, context: RenderContext): string {
 	switch (toolName) {
 		case "bash":
@@ -259,10 +260,9 @@ function formatCall(toolName: SupportedToolName, args: unknown, theme: Theme, co
 		case "tool_search": {
 			const query = compactOneLine(stringArg(args, "query") ?? "");
 			const title = theme.fg("toolTitle", theme.bold("tool_search"));
-			if (!query) return title;
 			const limit = numberArg(args, "limit");
 			const suffix = limit === undefined ? "" : theme.fg("muted", ` (limit ${limit})`);
-			return `${title} ${theme.fg("accent", query)}${suffix}`;
+			return `${title}${query ? ` ${theme.fg("accent", query)}` : ""}${suffix}`;
 		}
 		case "read": {
 			const path = formatLinkedPath(args, theme, context);
@@ -274,38 +274,40 @@ function formatCall(toolName: SupportedToolName, args: unknown, theme: Theme, co
 				const end = limit !== undefined ? start + limit - 1 : undefined;
 				range = theme.fg("warning", `:${start}${end !== undefined ? `-${end}` : ""}`);
 			}
-			return `${theme.fg("toolTitle", theme.bold("read"))} ${path}${range}`;
+			return `${theme.fg("toolTitle", theme.bold("read"))}${path || range ? ` ${path}${range}` : ""}`;
 		}
 		case "write": {
 			const path = formatLinkedPath(args, theme, context);
 			const content = stringArg(args, "content");
 			const lineCount = countTextLines(content, context);
 			const lineInfo = lineCount > 0 ? theme.fg("muted", ` (${lineCount} ${plural(lineCount, "line")})`) : "";
-			return `${theme.fg("toolTitle", theme.bold("write"))} ${path}${lineInfo}`;
+			return `${theme.fg("toolTitle", theme.bold("write"))}${path ? ` ${path}` : ""}${lineInfo}`;
 		}
-		case "edit":
-			return `${theme.fg("toolTitle", theme.bold("edit"))} ${formatLinkedPath(args, theme, context)}`;
+		case "edit": {
+			const path = formatLinkedPath(args, theme, context);
+			return `${theme.fg("toolTitle", theme.bold("edit"))}${path ? ` ${path}` : ""}`;
+		}
 		case "find": {
-			const pattern = compactOneLine(stringArg(args, "pattern") ?? "") || "...";
-			const path = displayPath(args, ".");
+			const pattern = compactOneLine(stringArg(args, "pattern") ?? "");
+			const path = displayPath(args);
 			const limit = numberArg(args, "limit");
 			const suffix = limit === undefined ? "" : theme.fg("muted", ` (limit ${limit})`);
-			return `${theme.fg("toolTitle", theme.bold("find"))} ${theme.fg("accent", pattern)}${theme.fg("toolOutput", ` in ${path}`)}${suffix}`;
+			return `${theme.fg("toolTitle", theme.bold("find"))}${pattern ? ` ${theme.fg("accent", pattern)}` : ""}${path ? theme.fg("toolOutput", ` in ${path}`) : ""}${suffix}`;
 		}
 		case "grep": {
-			const pattern = compactOneLine(stringArg(args, "pattern") ?? "") || "...";
-			const path = displayPath(args, ".");
-			const glob = stringArg(args, "glob");
+			const pattern = compactOneLine(stringArg(args, "pattern") ?? "");
+			const path = displayPath(args);
+			const glob = compactOneLine(stringArg(args, "glob") ?? "");
 			const limit = numberArg(args, "limit");
-			let suffix = glob ? theme.fg("muted", ` (${compactOneLine(glob)})`) : "";
+			let suffix = glob ? theme.fg("muted", ` (${glob})`) : "";
 			if (limit !== undefined) suffix += theme.fg("muted", ` limit ${limit}`);
-			return `${theme.fg("toolTitle", theme.bold("grep"))} ${theme.fg("accent", `/${pattern}/`)}${theme.fg("toolOutput", ` in ${path}`)}${suffix}`;
+			return `${theme.fg("toolTitle", theme.bold("grep"))}${pattern ? ` ${theme.fg("accent", `/${pattern}/`)}` : ""}${path ? theme.fg("toolOutput", ` in ${path}`) : ""}${suffix}`;
 		}
 		case "ls": {
-			const path = formatLinkedPath(args, theme, context, ".");
+			const path = formatLinkedPath(args, theme, context);
 			const limit = numberArg(args, "limit");
 			const suffix = limit === undefined ? "" : theme.fg("muted", ` (limit ${limit})`);
-			return `${theme.fg("toolTitle", theme.bold("ls"))} ${path}${suffix}`;
+			return `${theme.fg("toolTitle", theme.bold("ls"))}${path ? ` ${path}` : ""}${suffix}`;
 		}
 	}
 }
