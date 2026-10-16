@@ -4,7 +4,7 @@
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { type ExtensionAPI, ToolExecutionComponent, type ToolRenderers } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, formatReadLineRange, ToolExecutionComponent, type ToolRenderers } from "@earendil-works/pi-coding-agent";
 import { type Component, getCapabilities, hyperlink, stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 const SUPPORTED_TOOL_NAMES = new Set([
@@ -22,6 +22,7 @@ const SUPPORTED_TOOL_NAMES = new Set([
 
 const CODEMODE_STATUSES = new Set(["running", "ok", "error", "cancelled"] as const);
 const NATIVE_RENDERER_TOUCHED = Symbol("minimal-tool-view.native-renderer-touched");
+const NATIVE_TIMING_PRIMED = Symbol("minimal-tool-view.native-timing-primed");
 const EDIT_CALL_COMPONENT = Symbol("minimal-tool-view.edit-call-component");
 const WRITE_LINE_COUNT = Symbol("minimal-tool-view.write-line-count");
 
@@ -142,7 +143,8 @@ function stringArg(args: unknown, ...names: string[]): string | undefined {
 
 function numberArg(args: unknown, name: string): number | undefined {
 	if (!isRecord(args)) return undefined;
-	const value = args[name];
+	let value = args[name];
+	if (typeof value === "string" && value.trim() !== "") value = Number(value);
 	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
@@ -157,6 +159,13 @@ function compactOneLine(value: string): string {
 	return sanitizeDisplayText(value)
 		.replace(/\s+/g, (whitespace) => (/[\r\n]/.test(whitespace) ? " " : whitespace))
 		.trim();
+}
+
+// Search-pattern edge whitespace is meaningful. Test for blankness only after safe-text cleanup.
+function compactSearchPattern(value: string): string {
+	const text = sanitizeDisplayText(value)
+		.replace(/\s+/g, (whitespace) => (/[\r\n]/.test(whitespace) ? " " : whitespace));
+	return text.trim() ? text : "";
 }
 
 interface WriteLineCount {
@@ -239,11 +248,23 @@ function formatDuration(durationMs: number | undefined): string | undefined {
 }
 
 function formatShellCall(args: unknown, prompt: "$" | "PS>", theme: Theme): string {
-	// Preview available text even while arguments stream or a saved call has no result.
-	const normalized = sanitizeDisplayText(stringArg(args, "command") ?? "").replace(/\r\n?/g, "\n").trimStart();
-	const newline = normalized.indexOf("\n");
-	const firstLine = (newline === -1 ? normalized : normalized.slice(0, newline)).trimEnd();
-	const hasAdditionalContent = newline !== -1 && /\S/.test(normalized.slice(newline + 1));
+	const command = stringArg(args, "command") ?? "";
+	// This prefix determines the first meaningful line and whether anything follows it. Stop after
+	// the first nonblank tail character; later control codes cannot erase an earlier visible character.
+	const prefix = /^\s*([^\r\n]*)(?:[\r\n]\s*(\S)?)?/.exec(command);
+	let firstLine: string;
+	let hasAdditionalContent: boolean;
+	if (prefix && !/[\x1b\v\f]/.test(prefix[0])) {
+		firstLine = sanitizeDisplayText(prefix[1] ?? "").trimEnd();
+		hasAdditionalContent = prefix[2] !== undefined;
+	} else {
+		// ESC may remove text; VT/FF become visible replacements rather than whitespace. Keep Pi's
+		// complete cleanup for these cases instead of introducing a competing sequence parser.
+		const normalized = sanitizeDisplayText(command).replace(/\r\n?/g, "\n").trimStart();
+		const newline = normalized.indexOf("\n");
+		firstLine = (newline === -1 ? normalized : normalized.slice(0, newline)).trimEnd();
+		hasAdditionalContent = newline !== -1 && /\S/.test(normalized.slice(newline + 1));
+	}
 	const preview = firstLine ? ` ${firstLine}${hasAdditionalContent ? " ..." : ""}` : "";
 	return theme.fg("toolTitle", theme.bold(`${prompt}${preview}`));
 }
@@ -266,14 +287,9 @@ function formatCall(toolName: SupportedToolName, args: unknown, theme: Theme, co
 		}
 		case "read": {
 			const path = formatLinkedPath(args, theme, context);
-			let range = "";
-			const offset = numberArg(args, "offset");
-			const limit = numberArg(args, "limit");
-			if (offset !== undefined || limit !== undefined) {
-				const start = offset ?? 1;
-				const end = limit !== undefined ? start + limit - 1 : undefined;
-				range = theme.fg("warning", `:${start}${end !== undefined ? `-${end}` : ""}`);
-			}
+			// Preserve omitted versus malformed values for Pi's public range formatter.
+			const lineRange = isRecord(args) ? formatReadLineRange(args.offset, args.limit) : "";
+			const range = lineRange ? theme.fg("warning", lineRange) : "";
 			return `${theme.fg("toolTitle", theme.bold("read"))}${path || range ? ` ${path}${range}` : ""}`;
 		}
 		case "write": {
@@ -288,25 +304,25 @@ function formatCall(toolName: SupportedToolName, args: unknown, theme: Theme, co
 			return `${theme.fg("toolTitle", theme.bold("edit"))}${path ? ` ${path}` : ""}`;
 		}
 		case "find": {
-			const pattern = compactOneLine(stringArg(args, "pattern") ?? "");
+			const pattern = compactSearchPattern(stringArg(args, "pattern") ?? "");
 			const path = displayPath(args);
 			const limit = numberArg(args, "limit");
-			const suffix = limit === undefined ? "" : theme.fg("muted", ` (limit ${limit})`);
+			const suffix = limit === undefined ? "" : theme.fg("toolOutput", ` (limit ${limit})`);
 			return `${theme.fg("toolTitle", theme.bold("find"))}${pattern ? ` ${theme.fg("accent", pattern)}` : ""}${path ? theme.fg("toolOutput", ` in ${path}`) : ""}${suffix}`;
 		}
 		case "grep": {
-			const pattern = compactOneLine(stringArg(args, "pattern") ?? "");
+			const pattern = compactSearchPattern(stringArg(args, "pattern") ?? "");
 			const path = displayPath(args);
 			const glob = compactOneLine(stringArg(args, "glob") ?? "");
 			const limit = numberArg(args, "limit");
-			let suffix = glob ? theme.fg("muted", ` (${glob})`) : "";
-			if (limit !== undefined) suffix += theme.fg("muted", ` limit ${limit}`);
+			let suffix = glob ? theme.fg("toolOutput", ` (${glob})`) : "";
+			if (limit !== undefined) suffix += theme.fg("toolOutput", ` limit ${limit}`);
 			return `${theme.fg("toolTitle", theme.bold("grep"))}${pattern ? ` ${theme.fg("accent", `/${pattern}/`)}` : ""}${path ? theme.fg("toolOutput", ` in ${path}`) : ""}${suffix}`;
 		}
 		case "ls": {
 			const path = formatLinkedPath(args, theme, context);
 			const limit = numberArg(args, "limit");
-			const suffix = limit === undefined ? "" : theme.fg("muted", ` (limit ${limit})`);
+			const suffix = limit === undefined ? "" : theme.fg("toolOutput", ` (limit ${limit})`);
 			return `${theme.fg("toolTitle", theme.bold("ls"))}${path ? ` ${path}` : ""}${suffix}`;
 		}
 	}
@@ -393,6 +409,7 @@ function statusBackground(theme: Theme, status: MinimalVisualStatus): Background
 // Keep plugin-owned fields isolated in Pi's per-row state; never replace downstream state.
 interface MinimalRendererState {
 	[NATIVE_RENDERER_TOUCHED]?: boolean;
+	[NATIVE_TIMING_PRIMED]?: boolean;
 	[EDIT_CALL_COMPONENT]?: MinimalEditCallComponent;
 	[WRITE_LINE_COUNT]?: WriteLineCount;
 }
@@ -424,7 +441,7 @@ function contextForNative<T extends { lastComponent: Component | undefined }>(co
 
 const EMPTY_COMPONENT: Component = { render: () => [], invalidate() {} };
 
-// Pi 1.2.0's tool_search has no specialized renderers. Compose its public tool component to reuse
+// Pi's tool_search has no specialized renderers. Compose its public tool component to reuse
 // Pi's generic expanded argument/result formatting instead of copying private fallback helpers.
 class ToolSearchFallbackComponent implements Component {
 	private readonly view: ToolExecutionComponent;
@@ -511,10 +528,26 @@ export function createMinimalToolViewRenderers(toolName: SupportedToolName, nati
 	const downstream = prepareDownstreamRenderers(toolName, native);
 	if (!downstream) return native;
 	const selfFramedEdit = toolName === "edit" && downstream.renderShell === "self";
+	const preserveNativeTiming = toolName === "bash" || toolName === "powershell" || toolName === "codemode";
 
 	return {
 		...downstream,
 		renderCall(args, theme, context) {
+			const state = preserveNativeTiming ? rendererState(context) : undefined;
+			if (state && context.executionStarted && context.isPartial && !state[NATIVE_TIMING_PRIMED]) {
+				// Initialize the native clock once, not at first expansion. The call callback records
+				// timing without starting a periodic redraw; never send hidden partial-result updates.
+				state[NATIVE_TIMING_PRIMED] = true;
+				setNativeRendererTouched(context, true);
+				if (!context.expanded) {
+					try {
+						downstream.renderCall(args, theme, contextForNative(context));
+					} catch {
+						// An off-screen renderer failure must not hide the call. Retain the cleanup flag
+						// in case the native callback created state before throwing.
+					}
+				}
+			}
 			if (context.expanded) {
 				if (toolName === "write") {
 					const state = rendererState(context);
@@ -561,7 +594,7 @@ export function createMinimalToolViewRenderers(toolName: SupportedToolName, nati
 			// Some native renderers keep transient state while expanded (for example, a live shell timer).
 			// If the row is collapsed before the final result arrives, forward that final result off-screen so
 			// the native renderer can release its own transient resources.
-			if ((!options.isPartial || context.isError) && nativeRendererWasTouched(context)) {
+			if (!options.isPartial && nativeRendererWasTouched(context)) {
 				try {
 					downstream.renderResult(result, options, theme, contextForNative(context));
 				} catch {
