@@ -38,17 +38,23 @@ type CodemodeStatus = Parameters<typeof CODEMODE_STATUSES.has>[0];
 
 class MinimalLineComponent implements Component {
 	private text = "";
+	// Retain only the latest rendered width; setters and explicit invalidation release it.
+	private cache: { width: number; lines: string[] } | undefined;
 
 	setText(text: string): void {
+		if (this.text !== text) this.invalidate();
 		this.text = text;
 	}
 
 	invalidate(): void {
-		// No cached state.
+		this.cache = undefined;
 	}
 
 	render(width: number): string[] {
-		return renderSingleLine(this.text, width);
+		if (this.cache && this.cache.width === width) return this.cache.lines;
+		const lines = renderSingleLine(this.text, width);
+		this.cache = { width, lines };
+		return lines;
 	}
 }
 
@@ -56,13 +62,13 @@ class MinimalLineComponent implements Component {
 class MinimalCallComponent extends MinimalLineComponent {}
 class MinimalResultComponent extends MinimalLineComponent {}
 
-type MinimalVisualStatus = "pending" | "success" | "error";
 type BackgroundFn = (text: string) => string;
 
 class MinimalSelfShellLineComponent implements Component {
 	private text = "";
 	private paddingX = 0;
 	private bgFn: BackgroundFn = (text) => text;
+	private cache: { width: number; bgSample: string; lines: string[] } | undefined;
 
 	constructor(
 		private readonly paddingTop: number,
@@ -70,32 +76,40 @@ class MinimalSelfShellLineComponent implements Component {
 	) {}
 
 	setBottomPadding(padding: 0 | 1): void {
+		if (this.paddingBottom !== padding) this.invalidate();
 		this.paddingBottom = padding;
 	}
 
 	setContent(text: string, outputPad: number, bgFn: BackgroundFn): void {
+		const paddingX = Number.isFinite(outputPad) ? Math.max(0, Math.floor(outputPad)) : 0;
+		if (this.text !== text || this.paddingX !== paddingX) this.invalidate();
 		this.text = text;
-		this.paddingX = Number.isFinite(outputPad) ? Math.max(0, Math.floor(outputPad)) : 0;
+		this.paddingX = paddingX;
 		this.bgFn = bgFn;
 	}
 
 	invalidate(): void {
-		// No cached state.
+		this.cache = undefined;
 	}
 
 	render(width: number): string[] {
 		if (!this.text || !Number.isFinite(width) || width <= 0) return [];
+		// Like Pi's Box, observe theme output rather than the background callback's identity.
+		const bgSample = this.bgFn("test");
+		if (this.cache && this.cache.width === width && this.cache.bgSample === bgSample) return this.cache.lines;
 		const safeWidth = Math.floor(width);
 		const paddingX = Math.min(this.paddingX, Math.max(0, Math.floor((safeWidth - 1) / 2)));
 		const contentWidth = Math.max(1, safeWidth - paddingX * 2);
 		const content = renderSingleLine(this.text, contentWidth)[0] ?? " ".repeat(contentWidth);
 		const fullLine = `${" ".repeat(paddingX)}${content}${" ".repeat(paddingX)}`;
 		const blankLine = " ".repeat(safeWidth);
-		return [
+		const lines = [
 			...Array.from({ length: this.paddingTop }, () => this.bgFn(blankLine)),
 			this.bgFn(fullLine),
 			...Array.from({ length: this.paddingBottom }, () => this.bgFn(blankLine)),
 		];
+		this.cache = { width, bgSample, lines };
+		return lines;
 	}
 }
 
@@ -234,8 +248,8 @@ function formatLinkedPath(args: unknown, theme: Theme, context: RenderContext): 
 	}
 }
 
-function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
-	return count === 1 ? singular : pluralForm;
+function plural(count: number, singular: string): string {
+	return count === 1 ? singular : `${singular}s`;
 }
 
 function formatDuration(durationMs: number | undefined): string | undefined {
@@ -395,13 +409,8 @@ function formatResult(
 	return text;
 }
 
-function visualStatus(isPartial: boolean, isError: boolean): MinimalVisualStatus {
-	if (isPartial) return "pending";
-	return isError ? "error" : "success";
-}
-
-function statusBackground(theme: Theme, status: MinimalVisualStatus): BackgroundFn {
-	const token = status === "pending" ? "toolPendingBg" : status === "error" ? "toolErrorBg" : "toolSuccessBg";
+function statusBackground(theme: Theme, isPartial: boolean, isError: boolean): BackgroundFn {
+	const token = isPartial ? "toolPendingBg" : isError ? "toolErrorBg" : "toolSuccessBg";
 	return (text: string) => theme.bg(token, text);
 }
 
@@ -568,7 +577,7 @@ export function createMinimalToolViewRenderers(toolName: SupportedToolName, nati
 				component.setContent(
 					formatCall(toolName, args, theme, context),
 					context.outputPad,
-					statusBackground(theme, visualStatus(context.isPartial, context.isError)),
+					statusBackground(theme, context.isPartial, context.isError),
 				);
 				return component;
 			}
@@ -613,7 +622,7 @@ export function createMinimalToolViewRenderers(toolName: SupportedToolName, nati
 				component.setContent(
 					resultText,
 					context.outputPad,
-					statusBackground(theme, visualStatus(options.isPartial, context.isError)),
+					statusBackground(theme, options.isPartial, context.isError),
 				);
 				return component;
 			}
