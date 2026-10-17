@@ -150,21 +150,22 @@ function numberArg(args: unknown, name: string): number | undefined {
 
 function sanitizeDisplayText(value: string): string {
 	return stripTerminalSequences(value)
-		.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, "\uFFFD")
-		.replace(/[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, "\uFFFD");
+		.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, "\uFFFD");
+}
+
+function toSingleLine(value: string): string {
+	// Visit each whitespace run once; only runs containing CR/LF are collapsed.
+	return sanitizeDisplayText(value)
+		.replace(/\s+/g, (whitespace) => (/[\r\n]/.test(whitespace) ? " " : whitespace));
 }
 
 function compactOneLine(value: string): string {
-	// Visit each whitespace run once; only runs containing CR/LF are collapsed.
-	return sanitizeDisplayText(value)
-		.replace(/\s+/g, (whitespace) => (/[\r\n]/.test(whitespace) ? " " : whitespace))
-		.trim();
+	return toSingleLine(value).trim();
 }
 
 // Search-pattern edge whitespace is meaningful. Test for blankness only after safe-text cleanup.
 function compactSearchPattern(value: string): string {
-	const text = sanitizeDisplayText(value)
-		.replace(/\s+/g, (whitespace) => (/[\r\n]/.test(whitespace) ? " " : whitespace));
+	const text = toSingleLine(value);
 	return text.trim() ? text : "";
 }
 
@@ -217,11 +218,12 @@ function normalizeLinkPath(value: string): string {
 }
 
 function formatLinkedPath(args: unknown, theme: Theme, context: RenderContext): string {
-	const label = displayPath(args);
+	const raw = stringArg(args, "file_path", "path");
+	if (raw === undefined) return "";
+	const label = compactOneLine(raw);
 	if (!label) return "";
 	const text = theme.fg("accent", label);
-	const raw = stringArg(args, "file_path", "path");
-	if (!getCapabilities().hyperlinks || raw === undefined || raw.trim() === "") return text;
+	if (!getCapabilities().hyperlinks || raw.trim() === "") return text;
 	try {
 		const path = normalizeLinkPath(raw);
 		const absolute = isAbsolute(path) ? resolve(path) : resolve(normalizeLinkPath(context.cwd), path);
@@ -239,8 +241,8 @@ function plural(count: number, singular: string, pluralForm = `${singular}s`): s
 function formatDuration(durationMs: number | undefined): string | undefined {
 	if (durationMs === undefined || !Number.isFinite(durationMs) || durationMs < 0) return undefined;
 	if (durationMs < 1000) return `${Math.round(durationMs)}ms`;
-	const totalSeconds = Math.floor(durationMs / 1000);
 	if (durationMs < 60_000) return `${(durationMs / 1000).toFixed(1)}s`;
+	const totalSeconds = Math.floor(durationMs / 1000);
 	const minutes = Math.floor(totalSeconds / 60);
 	const seconds = totalSeconds % 60;
 	if (minutes < 60) return `${minutes}m ${seconds}s`;
@@ -271,16 +273,14 @@ function formatShellCall(args: unknown, prompt: "$" | "PS>", theme: Theme): stri
 
 // Show only supplied preview fields. Missing fields have no placeholder or inferred path.
 function formatCall(toolName: SupportedToolName, args: unknown, theme: Theme, context: RenderContext): string {
+	if (toolName === "bash") return formatShellCall(args, "$", theme);
+	if (toolName === "powershell") return formatShellCall(args, "PS>", theme);
+	const title = theme.fg("toolTitle", theme.bold(toolName));
 	switch (toolName) {
-		case "bash":
-			return formatShellCall(args, "$", theme);
-		case "powershell":
-			return formatShellCall(args, "PS>", theme);
 		case "codemode":
-			return theme.fg("toolTitle", theme.bold("codemode"));
+			return title;
 		case "tool_search": {
 			const query = compactOneLine(stringArg(args, "query") ?? "");
-			const title = theme.fg("toolTitle", theme.bold("tool_search"));
 			const limit = numberArg(args, "limit");
 			const suffix = limit === undefined ? "" : theme.fg("muted", ` (limit ${limit})`);
 			return `${title}${query ? ` ${theme.fg("accent", query)}` : ""}${suffix}`;
@@ -290,25 +290,24 @@ function formatCall(toolName: SupportedToolName, args: unknown, theme: Theme, co
 			// Preserve omitted versus malformed values for Pi's public range formatter.
 			const lineRange = isRecord(args) ? formatReadLineRange(args.offset, args.limit) : "";
 			const range = lineRange ? theme.fg("warning", lineRange) : "";
-			return `${theme.fg("toolTitle", theme.bold("read"))}${path || range ? ` ${path}${range}` : ""}`;
+			return `${title}${path || range ? ` ${path}${range}` : ""}`;
 		}
 		case "write": {
 			const path = formatLinkedPath(args, theme, context);
-			const content = stringArg(args, "content");
-			const lineCount = countTextLines(content, context);
+			const lineCount = countTextLines(stringArg(args, "content"), context);
 			const lineInfo = lineCount > 0 ? theme.fg("muted", ` (${lineCount} ${plural(lineCount, "line")})`) : "";
-			return `${theme.fg("toolTitle", theme.bold("write"))}${path ? ` ${path}` : ""}${lineInfo}`;
+			return `${title}${path ? ` ${path}` : ""}${lineInfo}`;
 		}
 		case "edit": {
 			const path = formatLinkedPath(args, theme, context);
-			return `${theme.fg("toolTitle", theme.bold("edit"))}${path ? ` ${path}` : ""}`;
+			return `${title}${path ? ` ${path}` : ""}`;
 		}
 		case "find": {
 			const pattern = compactSearchPattern(stringArg(args, "pattern") ?? "");
 			const path = displayPath(args);
 			const limit = numberArg(args, "limit");
 			const suffix = limit === undefined ? "" : theme.fg("toolOutput", ` (limit ${limit})`);
-			return `${theme.fg("toolTitle", theme.bold("find"))}${pattern ? ` ${theme.fg("accent", pattern)}` : ""}${path ? theme.fg("toolOutput", ` in ${path}`) : ""}${suffix}`;
+			return `${title}${pattern ? ` ${theme.fg("accent", pattern)}` : ""}${path ? theme.fg("toolOutput", ` in ${path}`) : ""}${suffix}`;
 		}
 		case "grep": {
 			const pattern = compactSearchPattern(stringArg(args, "pattern") ?? "");
@@ -317,13 +316,13 @@ function formatCall(toolName: SupportedToolName, args: unknown, theme: Theme, co
 			const limit = numberArg(args, "limit");
 			let suffix = glob ? theme.fg("toolOutput", ` (${glob})`) : "";
 			if (limit !== undefined) suffix += theme.fg("toolOutput", ` limit ${limit}`);
-			return `${theme.fg("toolTitle", theme.bold("grep"))}${pattern ? ` ${theme.fg("accent", `/${pattern}/`)}` : ""}${path ? theme.fg("toolOutput", ` in ${path}`) : ""}${suffix}`;
+			return `${title}${pattern ? ` ${theme.fg("accent", `/${pattern}/`)}` : ""}${path ? theme.fg("toolOutput", ` in ${path}`) : ""}${suffix}`;
 		}
 		case "ls": {
 			const path = formatLinkedPath(args, theme, context);
 			const limit = numberArg(args, "limit");
 			const suffix = limit === undefined ? "" : theme.fg("toolOutput", ` (limit ${limit})`);
-			return `${theme.fg("toolTitle", theme.bold("ls"))}${path ? ` ${path}` : ""}${suffix}`;
+			return `${title}${path ? ` ${path}` : ""}${suffix}`;
 		}
 	}
 }
@@ -429,10 +428,8 @@ function setNativeRendererTouched(context: RenderContext, touched: boolean): voi
 
 function contextForNative<T extends { lastComponent: Component | undefined }>(context: T): T {
 	if (
-		!(context.lastComponent instanceof MinimalCallComponent) &&
-		!(context.lastComponent instanceof MinimalResultComponent) &&
-		!(context.lastComponent instanceof MinimalEditCallComponent) &&
-		!(context.lastComponent instanceof MinimalEditResultComponent)
+		!(context.lastComponent instanceof MinimalLineComponent) &&
+		!(context.lastComponent instanceof MinimalSelfShellLineComponent)
 	) {
 		return context;
 	}
@@ -533,8 +530,8 @@ export function createMinimalToolViewRenderers(toolName: SupportedToolName, nati
 	return {
 		...downstream,
 		renderCall(args, theme, context) {
-			const state = preserveNativeTiming ? rendererState(context) : undefined;
-			if (state && context.executionStarted && context.isPartial && !state[NATIVE_TIMING_PRIMED]) {
+			const state = rendererState(context);
+			if (preserveNativeTiming && state && context.executionStarted && context.isPartial && !state[NATIVE_TIMING_PRIMED]) {
 				// Initialize the native clock once, not at first expansion. The call callback records
 				// timing without starting a periodic redraw; never send hidden partial-result updates.
 				state[NATIVE_TIMING_PRIMED] = true;
@@ -550,11 +547,9 @@ export function createMinimalToolViewRenderers(toolName: SupportedToolName, nati
 			}
 			if (context.expanded) {
 				if (toolName === "write") {
-					const state = rendererState(context);
 					if (state) delete state[WRITE_LINE_COUNT];
 				}
 				if (selfFramedEdit) {
-					const state = rendererState(context);
 					if (state) delete state[EDIT_CALL_COMPONENT];
 				}
 				const component = downstream.renderCall(args, theme, contextForNative(context));
@@ -569,7 +564,6 @@ export function createMinimalToolViewRenderers(toolName: SupportedToolName, nati
 				// Keep both margins until Pi supplies a result. Its call/result callbacks share row state;
 				// renderResult transfers the bottom margin before the components are drawn.
 				component.setBottomPadding(1);
-				const state = rendererState(context);
 				if (state) state[EDIT_CALL_COMPONENT] = component;
 				component.setContent(
 					formatCall(toolName, args, theme, context),

@@ -8,7 +8,7 @@
 
 https://github.com/user-attachments/assets/b7fbd71c-fc77-45b7-8d63-8b074c5828e8
 
-Version: **0.3.3**  
+Version: **0.3.4**  
 Requires **Pi Agent 1.3.0 or later**.
 
 Supported tool names:
