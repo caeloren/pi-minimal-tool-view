@@ -1,7 +1,7 @@
 {
   "name": "@caeloren/pi-minimal-tool-view",
-  "version": "0.3.6",
-  "description": "Unified minimal rendering for Pi Agent's file, search, shell, codemode, and tool discovery tools.",
+  "version": "0.4.1",
+  "description": "Unified minimal rendering for Pi Agent's file, search, shell, codemode, tool discovery, and MCP resource tools.",
   "private": true,
   "type": "module",
   "license": "SUL-1.0",

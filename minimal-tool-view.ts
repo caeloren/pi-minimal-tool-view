@@ -7,6 +7,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { type ExtensionAPI, formatReadLineRange, ToolExecutionComponent, type ToolRenderers } from "@earendil-works/pi-coding-agent";
 import { type Component, getCapabilities, hyperlink, stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
+// Conditional MCP resource tools: the only names that get display-only renderers when not registered.
+const MCP_RESOURCE_TOOLS = ["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"] as const;
 const SUPPORTED_TOOL_NAMES = new Set([
 	"read",
 	"bash",
@@ -18,7 +20,10 @@ const SUPPORTED_TOOL_NAMES = new Set([
 	"ls",
 	"codemode",
 	"tool_search",
+	...MCP_RESOURCE_TOOLS,
 ] as const);
+const MCP_RESOURCE_TOOL_NAMES: ReadonlySet<string> = new Set(MCP_RESOURCE_TOOLS);
+const GENERIC_TOOL_NAMES: ReadonlySet<string> = new Set(["tool_search", ...MCP_RESOURCE_TOOLS]);
 
 const CODEMODE_STATUSES = new Set(["running", "ok", "error", "cancelled"] as const);
 const NATIVE_RENDERER_TOUCHED = Symbol("minimal-tool-view.native-renderer-touched");
@@ -125,10 +130,24 @@ class MinimalEditResultComponent extends MinimalSelfShellLineComponent {
 	}
 }
 
+// Printable ASCII, "→", "·", and the ESC that starts terminal sequences: every visible character is a
+// grapheme of its own, so Pi's two width functions measure such text alike.
+const SIMPLE_WIDTH_TEXT = /^[\x1b\x20-\x7e\u2192\u00b7]*$/;
+const ASCII_WIDTH_TEXT = /^[\x1b\x20-\x7e]*$/;
+
 function renderSingleLine(text: string, width: number): string[] {
 	if (!text || !Number.isFinite(width) || width <= 0) return [];
 	const safeWidth = Math.floor(width);
 	const normalized = text.replace(/\t/g, "   ");
+	// Above three columns, truncateToWidth returns a line that fits unchanged but has no fast path for
+	// styled text, so measure first where that wastes little: simple text no longer than the width, which
+	// always fits, and ASCII, which Pi measures without grapheme segmentation. Everything else, and every
+	// width of three columns or fewer, keeps the original path.
+	const measurable = normalized.length <= safeWidth ? SIMPLE_WIDTH_TEXT : ASCII_WIDTH_TEXT;
+	if (safeWidth > 3 && normalized.length <= 1024 && measurable.test(normalized)) {
+		const fitted = visibleWidth(normalized);
+		if (fitted <= safeWidth) return [`${normalized}${" ".repeat(safeWidth - fitted)}`];
+	}
 	let displayed = truncateToWidth(normalized, safeWidth, "...");
 
 	if (displayed !== normalized) {
@@ -293,6 +312,16 @@ function formatCall(toolName: SupportedToolName, args: unknown, theme: Theme, co
 	switch (toolName) {
 		case "codemode":
 			return title;
+		case "list_mcp_resources":
+		case "list_mcp_resource_templates":
+		case "read_mcp_resource": {
+			const keys = toolName === "read_mcp_resource" ? ["server", "uri"] : ["server", "cursor"];
+			const fields = keys.flatMap((key) => {
+				const value = compactOneLine(stringArg(args, key) ?? "");
+				return value ? [`${key}=${JSON.stringify(value)}`] : [];
+			});
+			return `${title}${fields.length ? ` ${theme.fg("muted", fields.join(" "))}` : ""}`;
+		}
 		case "tool_search": {
 			const query = compactOneLine(stringArg(args, "query") ?? "");
 			const limit = numberArg(args, "limit");
@@ -447,18 +476,23 @@ function contextForNative<T extends { lastComponent: Component | undefined }>(co
 
 const EMPTY_COMPONENT: Component = { render: () => [], invalidate() {} };
 
-// Pi's tool_search has no specialized renderers. Compose its public tool component to reuse
+// The allowlisted generic tools have no specialized renderers. Compose Pi's public component to reuse
 // Pi's generic expanded argument/result formatting instead of copying private fallback helpers.
-class ToolSearchFallbackComponent implements Component {
+class GenericFallbackComponent implements Component {
 	private readonly view: ToolExecutionComponent;
 
-	constructor(readonly slot: "call" | "result", args: unknown, context: RenderContext) {
+	constructor(
+		readonly toolName: SupportedToolName,
+		readonly slot: "call" | "result",
+		args: unknown,
+		context: RenderContext,
+	) {
 		const renderers: ToolRenderers = { renderShell: "self" };
 		if (slot === "result") renderers.renderCall = () => EMPTY_COMPONENT;
 		// The public tool component only needs requestRender from this UI argument. Route it to the
 		// owning row's public invalidation callback; never start another TUI or access its internals.
 		const ui = { requestRender: context.invalidate } as ConstructorParameters<typeof ToolExecutionComponent>[5];
-		this.view = new ToolExecutionComponent("tool_search", context.toolCallId, args, {
+		this.view = new ToolExecutionComponent(toolName, context.toolCallId, args, {
 			showImages: false,
 			outputPad: 0,
 		}, renderers, ui, context.cwd);
@@ -490,16 +524,21 @@ class ToolSearchFallbackComponent implements Component {
 	}
 }
 
-function toolSearchFallback(slot: "call" | "result", args: unknown, context: RenderContext): ToolSearchFallbackComponent {
+function genericFallback(
+	toolName: SupportedToolName,
+	slot: "call" | "result",
+	args: unknown,
+	context: RenderContext,
+): GenericFallbackComponent {
 	const previous = context.lastComponent;
-	if (previous instanceof ToolSearchFallbackComponent && previous.slot === slot) {
+	if (previous instanceof GenericFallbackComponent && previous.toolName === toolName && previous.slot === slot) {
 		// Only the call slot displays arguments. Updating a result slot's arguments would redraw its
 		// old result immediately before updateResult draws the new one.
 		if (slot === "call") previous.updateArgs(args);
 		return previous;
 	}
 	// The native constructor already initializes the arguments; do not update them a second time.
-	return new ToolSearchFallbackComponent(slot, args, context);
+	return new GenericFallbackComponent(toolName, slot, args, context);
 }
 
 function hasCompleteRenderers(renderers: ToolRenderers): renderers is CompleteToolRenderers {
@@ -510,17 +549,17 @@ function prepareDownstreamRenderers(
 	toolName: SupportedToolName,
 	native: ToolRenderers,
 ): CompleteToolRenderers | undefined {
-	if (toolName === "tool_search") {
+	if (GENERIC_TOOL_NAMES.has(toolName)) {
 		// Do not guess how an unrelated self-framed replacement should be composed.
 		if (native.renderShell === "self") return undefined;
 		if (!native.renderCall && !native.renderResult) {
 			return {
 				...native,
 				renderCall(args, _theme, context) {
-					return toolSearchFallback("call", args, context);
+					return genericFallback(toolName, "call", args, context);
 				},
 				renderResult(result, options, _theme, context) {
-					const component = toolSearchFallback("result", context.args, context);
+					const component = genericFallback(toolName, "result", context.args, context);
 					component.updateResult(result, options, context);
 					return component;
 				},
@@ -638,7 +677,9 @@ export function createMinimalToolViewRenderers(toolName: SupportedToolName, nati
 export default function minimalToolView(pi: ExtensionAPI): void {
 	pi.registerToolRenderer((toolName, next) => {
 		const native = next();
-		if (!SUPPORTED_TOOL_NAMES.has(toolName as SupportedToolName) || !native) return native;
-		return createMinimalToolViewRenderers(toolName as SupportedToolName, native);
+		if (!SUPPORTED_TOOL_NAMES.has(toolName as SupportedToolName)) return native;
+		// Saved MCP resource calls remain displayable without reconnecting or enabling their tools.
+		if (!native && !MCP_RESOURCE_TOOL_NAMES.has(toolName)) return native;
+		return createMinimalToolViewRenderers(toolName as SupportedToolName, native ?? {});
 	});
 }
