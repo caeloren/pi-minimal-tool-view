@@ -301,7 +301,10 @@ function formatShellCall(args: unknown, prompt: "$" | "PS>", theme: Theme): stri
 		hasAdditionalContent = newline !== -1 && /\S/.test(normalized.slice(newline + 1));
 	}
 	const preview = firstLine ? ` ${firstLine}${hasAdditionalContent ? " ..." : ""}` : "";
-	return theme.fg("toolTitle", theme.bold(`${prompt}${preview}`));
+	// Append a supplied timeout as Pi's own call line does; the whole line is then fitted to the width.
+	const timeout = numberArg(args, "timeout");
+	const timeoutText = timeout ? theme.fg("muted", ` (timeout ${timeout}s)`) : "";
+	return `${theme.fg("toolTitle", theme.bold(`${prompt}${preview}`))}${timeoutText}`;
 }
 
 // Show only supplied preview fields. Missing fields have no placeholder or inferred path.
