@@ -130,24 +130,10 @@ class MinimalEditResultComponent extends MinimalSelfShellLineComponent {
 	}
 }
 
-// Printable ASCII, "→", "·", and the ESC that starts terminal sequences: every visible character is a
-// grapheme of its own, so Pi's two width functions measure such text alike.
-const SIMPLE_WIDTH_TEXT = /^[\x1b\x20-\x7e\u2192\u00b7]*$/;
-const ASCII_WIDTH_TEXT = /^[\x1b\x20-\x7e]*$/;
-
 function renderSingleLine(text: string, width: number): string[] {
 	if (!text || !Number.isFinite(width) || width <= 0) return [];
 	const safeWidth = Math.floor(width);
 	const normalized = text.replace(/\t/g, "   ");
-	// Above three columns, truncateToWidth returns a line that fits unchanged but has no fast path for
-	// styled text, so measure first where that wastes little: simple text no longer than the width, which
-	// always fits, and ASCII, which Pi measures without grapheme segmentation. Everything else, and every
-	// width of three columns or fewer, keeps the original path.
-	const measurable = normalized.length <= safeWidth ? SIMPLE_WIDTH_TEXT : ASCII_WIDTH_TEXT;
-	if (safeWidth > 3 && normalized.length <= 1024 && measurable.test(normalized)) {
-		const fitted = visibleWidth(normalized);
-		if (fitted <= safeWidth) return [`${normalized}${" ".repeat(safeWidth - fitted)}`];
-	}
 	let displayed = truncateToWidth(normalized, safeWidth, "...");
 
 	if (displayed !== normalized) {
@@ -284,22 +270,12 @@ function formatDuration(durationMs: number | undefined): string | undefined {
 
 function formatShellCall(args: unknown, prompt: "$" | "PS>", theme: Theme): string {
 	const command = stringArg(args, "command") ?? "";
-	// This prefix determines the first meaningful line and whether anything follows it. Stop after
-	// the first nonblank tail character; later control codes cannot erase an earlier visible character.
-	const prefix = /^\s*([^\r\n]*)(?:[\r\n]\s*(\S)?)?/.exec(command);
-	let firstLine: string;
-	let hasAdditionalContent: boolean;
-	if (prefix && !/[\x1b\v\f]/.test(prefix[0])) {
-		firstLine = sanitizeDisplayText(prefix[1] ?? "").trimEnd();
-		hasAdditionalContent = prefix[2] !== undefined;
-	} else {
-		// ESC may remove text; VT/FF become visible replacements rather than whitespace. Keep Pi's
-		// complete cleanup for these cases instead of introducing a competing sequence parser.
-		const normalized = sanitizeDisplayText(command).replace(/\r\n?/g, "\n").trimStart();
-		const newline = normalized.indexOf("\n");
-		firstLine = (newline === -1 ? normalized : normalized.slice(0, newline)).trimEnd();
-		hasAdditionalContent = newline !== -1 && /\S/.test(normalized.slice(newline + 1));
-	}
+	// Clean the whole command before taking its first meaningful line: terminal sequences may remove
+	// text, and VT/FF become visible replacements rather than whitespace.
+	const normalized = sanitizeDisplayText(command).replace(/\r\n?/g, "\n").trimStart();
+	const newline = normalized.indexOf("\n");
+	const firstLine = (newline === -1 ? normalized : normalized.slice(0, newline)).trimEnd();
+	const hasAdditionalContent = newline !== -1 && /\S/.test(normalized.slice(newline + 1));
 	const preview = firstLine ? ` ${firstLine}${hasAdditionalContent ? " ..." : ""}` : "";
 	// Append a supplied timeout as Pi's own call line does; the whole line is then fitted to the width.
 	const timeout = numberArg(args, "timeout");
@@ -492,9 +468,12 @@ class GenericFallbackComponent implements Component {
 	) {
 		const renderers: ToolRenderers = { renderShell: "self" };
 		if (slot === "result") renderers.renderCall = () => EMPTY_COMPONENT;
-		// The public tool component only needs requestRender from this UI argument. Route it to the
-		// owning row's public invalidation callback; never start another TUI or access its internals.
-		const ui = { requestRender: context.invalidate } as ConstructorParameters<typeof ToolExecutionComponent>[5];
+		// The public tool component uses this UI argument only to request renders; never start another TUI
+		// or access its internals. This display-only copy has no images or timers of its own and changes only
+		// while its owning row updates or draws it, so the row's own redraw always shows it. Its requests are
+		// therefore ignored: forwarding them (Pi 1.5.0 makes one from updateArgs) would make the row redraw
+		// itself from inside its own update.
+		const ui = { requestRender() {} } as ConstructorParameters<typeof ToolExecutionComponent>[5];
 		this.view = new ToolExecutionComponent(toolName, context.toolCallId, args, {
 			showImages: false,
 			outputPad: 0,
