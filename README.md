@@ -8,7 +8,7 @@
 
 https://github.com/user-attachments/assets/759556ca-e92c-403c-9e29-13957c376f94
 
-Version: **0.4.2**  
+Version: **0.4.3**  
 Requires **Pi Agent 1.5.0 or later**.
 
 Supported tool names:
@@ -111,7 +111,7 @@ Bash and PowerShell previews show the first meaningful line, followed by a suppl
 
 Before Pi supplies a result, only the call preview is shown. Partial results show `running`; successful final results show `completed`; error results show `failed`. Final durations are included when Pi supplies valid values. In live sessions, Bash, PowerShell, and Codemode initialize their downstream timing at execution start, so delayed expansion does not restart the native clock.
 
-`read`, `write`, `edit`, and `ls` path previews are clickable when Pi detects terminal hyperlink support. Links target the full path even when the visible label is truncated; opening behavior and click gestures depend on the terminal. Other environments keep plain text. `write` line counts are derived from the supplied content. Read ranges match Pi's native format, and invalid limit values are omitted.
+`read`, `write`, `edit`, and `ls` path previews are clickable when Pi detects terminal hyperlink support. Links target the full path even when the visible label is truncated; opening behavior and click gestures depend on the terminal. Other environments keep plain text. `write` line counts are derived from the supplied content. Read ranges match Pi's native format; a malformed offset or limit omits the range.
 
 `find`, `grep`, and `ls` show compact argument previews but do not guess result totals. Codemode call counts are shown only when Pi supplies complete, valid structured call data. `tool_search` shows a single-line query preview and counts tools from valid result data in successful final results. Zero matches is a successful `0 tools loaded`; missing, malformed, or duplicate data omits the count. Searching and loading tools remain entirely Pi's responsibility.
 
