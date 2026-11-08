@@ -27,10 +27,6 @@ read_mcp_resource
 
 The extension changes rendering only. It does not execute or replace tools, modify tool arguments or results, alter prompts or sessions, access files or the network, or persist package-owned user data.
 
-### Demo
-
-https://github.com/user-attachments/assets/759556ca-e92c-403c-9e29-13957c376f94
-
 ## Usage
 
 ### Install
@@ -150,3 +146,6 @@ pi uninstall git:github.com/caeloren/pi-minimal-tool-view
 - Minimal previews are not secret redaction. Visible command prefixes, paths, and patterns may contain sensitive information, and the full underlying content remains in Pi's normal runtime and session data.
 - In the terminal, PowerShell rows are minimized even while the `powershell` tool is not enabled, such as calls in saved sessions; Pi remains responsible for enabling the tool, shell availability, and command execution.
 - Licensed under the Sustainable Use License 1.0 (`SUL-1.0`). See [LICENSE](LICENSE).
+
+
+https://github.com/user-attachments/assets/6be73c16-ac68-4628-a868-ccab37c8141c
