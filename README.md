@@ -4,11 +4,7 @@
 
 `@caeloren/pi-minimal-tool-view` provides compact collapsed views for Pi Agent tool calls while preserving Pi's downstream, normally native, expanded views.
 
-### Demo
-
-https://github.com/user-attachments/assets/759556ca-e92c-403c-9e29-13957c376f94
-
-Version: **0.4.3**  
+Version: **0.4.6**  
 Requires **Pi Agent 1.5.0 or later**.
 
 Supported tool names:
@@ -30,6 +26,10 @@ read_mcp_resource
 ```
 
 The extension changes rendering only. It does not execute or replace tools, modify tool arguments or results, alter prompts or sessions, access files or the network, or persist package-owned user data.
+
+### Demo
+
+https://github.com/user-attachments/assets/759556ca-e92c-403c-9e29-13957c376f94
 
 ## Usage
 
@@ -105,17 +105,17 @@ read_mcp_resource server="docs" uri="docs://guide"
 → completed · 97ms
 ```
 
-Collapsed previews show each tool's selected fields as Pi supplies them: commands, shell timeouts, paths, patterns, queries, read ranges, write line counts, and supported glob/limit options. They do not display every tool argument. Missing or blank fields stay empty; only the tool name or shell prompt remains when no preview fields are available. No placeholders or inferred paths are added, including `.` for an omitted directory. A literal `.` supplied as a path is still shown. Saved calls without a result retain their saved preview without indicating completion or restarting execution.
+Collapsed previews show each tool's selected fields as Pi supplies them: commands, shell timeouts, paths, patterns, queries, read ranges, write line counts, and supported glob and limit options. They do not display every tool argument. Missing, null, or blank fields stay empty; only the tool name or shell prompt remains when no preview fields are available. No placeholders or inferred paths are added, including `.` for an omitted directory. A literal `.` supplied as a path is still shown. A number or boolean given for a text argument is treated as the text Pi converts it to before running the tool, for example `$ true` or `read 5`. As in Pi's own views, a command, path, pattern, or Codemode source of another type, such as an object, shows `[invalid arg]`, `write` content of another type shows `[invalid content arg - expected string]`, and a `grep` glob of another type is omitted. Saved calls without a result retain their saved preview without indicating completion or restarting execution.
 
-Bash and PowerShell previews show the first meaningful line, followed by a supplied nonzero numeric timeout in Pi's `(timeout 120s)` format. Generated `...` only indicates omitted content: insufficient display width, or additional nonblank command lines. It never indicates missing input or streaming progress. Other text fields are compacted to one line and truncated only when needed. Nonblank `grep`/`find` patterns retain their leading and trailing whitespace after control-sequence cleanup. Codemode source and edit bodies remain hidden until expanded.
+Bash and PowerShell previews show the first meaningful line, followed by a supplied nonzero numeric timeout in Pi's `(timeout 120s)` format. Generated `...` only indicates omitted content: insufficient display width, or additional nonblank command lines. It never indicates missing input or streaming progress. Other text fields are compacted to one line and truncated only when needed. Nonblank `grep`/`find` patterns and `find`/`grep`/`ls` limits retain their leading and trailing whitespace after control-sequence cleanup. Codemode source and edit bodies remain hidden until expanded.
 
 Before Pi supplies a result, only the call preview is shown. Partial results show `running`; successful final results show `completed`; error results show `failed`. Final durations are included when Pi supplies valid values. In live sessions, Bash, PowerShell, and Codemode initialize their downstream timing at execution start, so delayed expansion does not restart the native clock.
 
-`read`, `write`, `edit`, and `ls` path previews are clickable when Pi detects terminal hyperlink support. Links target the full path even when the visible label is truncated; opening behavior and click gestures depend on the terminal. Other environments keep plain text. `write` line counts are derived from the supplied content. Read ranges match Pi's native format; a malformed offset or limit omits the range.
+Paths follow Pi's own views: `read`, `write`, and `edit` use `file_path` unless it is missing or null, in which case they use `path`. Pi's tools run only `path`, so a `file_path` that is not a string, even a number, shows `[invalid arg]`. An absolute path inside the home directory is shown starting with `~`. `read`, `write`, `edit`, and `ls` path previews are clickable when Pi detects terminal hyperlink support. Links target the full path even when the visible label is shortened or truncated; opening behavior and click gestures depend on the terminal. Other environments keep plain text. `write` line counts are derived from the supplied content. Read ranges match Pi's native format; a malformed offset or limit omits the range.
 
-`find`, `grep`, and `ls` show compact argument previews but do not guess result totals. Codemode call counts are shown only when Pi supplies complete, valid structured call data. `tool_search` shows a single-line query preview and counts tools from valid result data in successful final results. Zero matches is a successful `0 tools loaded`; missing, malformed, or duplicate data omits the count. Searching and loading tools remain entirely Pi's responsibility.
+`find`, `grep`, and `ls` show compact argument previews but do not guess result totals. A supplied limit is shown as in Pi's own views, even a value Pi does not accept, for example `ls src (limit abc)`. Codemode call counts are shown only when Pi supplies complete, valid structured call data. `tool_search` shows a single-line query preview and its limit; a query of another type, such as an object, and a limit that is not a number are shown as JSON, as in Pi's generic view, for example `(limit "abc")`. It counts tools from valid result data in successful final results. Zero matches is a successful `0 tools loaded`; missing, malformed, or duplicate data omits the count. Searching and loading tools remain entirely Pi's responsibility.
 
-MCP resource previews show supplied, nonblank arguments as `key="value"` pairs: `server` and `cursor` for the list tools, and `server` and `uri` for the read tool. Values are cleaned into one line; missing fields are omitted. Cursors are not decoded, and URIs are not treated as local paths or made clickable. Results show only the outer call status and valid final duration, not resource counts; aggregate listing errors remain in the detailed output. Saved resource calls remain displayable when their tools are not registered, without connecting or re-executing.
+MCP resource previews show supplied, nonblank arguments as `key="value"` pairs: `server` and `cursor` for the list tools, and `server` and `uri` for the read tool. Values are cleaned into one line; missing fields are omitted. As with other text arguments, a number or boolean is shown as the text Pi runs, for example `server="5"`; a value of another type, such as an object, is shown as JSON, as in Pi's generic view. Cursors are not decoded, and URIs are not treated as local paths or made clickable. Results show only the outer call status and valid final duration, not resource counts; aggregate listing errors remain in the detailed output. Saved resource calls remain displayable when their tools are not registered, without connecting or re-executing.
 
 Use Pi's normal expand action, **Control + O** by default, to view details through the downstream renderer, subject to Pi's normal display and truncation limits. In the interactive terminal, `tool_search` and the three MCP resource tools use Pi's generic expanded view when no specialized downstream renderer is present, showing the supplied arguments and available result content.
 
@@ -148,5 +148,5 @@ pi uninstall git:github.com/caeloren/pi-minimal-tool-view
 - Collapsed rows deliberately omit live elapsed displays and do not start periodic timers. Expanded timing and any associated redraw timer belong to the downstream renderer; final minimal summaries use Pi's recorded duration. Pi also does not expose a distinct top-level cancellation flag, so a cancellation reported as an error appears as `failed`.
 - Inline images and HTML exports are handled partly by Pi. HTML expansion does not regenerate pre-rendered call headings, so multiline PowerShell commands, Codemode source, and long previews such as `tool_search` queries or MCP URIs may be hidden or shortened in the displayed heading. The original arguments remain in the HTML's embedded session data. Native export timing may measure rendering rather than the original execution; a near-zero `Took` is not a reliable historical duration.
 - Minimal previews are not secret redaction. Visible command prefixes, paths, and patterns may contain sensitive information, and the full underlying content remains in Pi's normal runtime and session data.
-- PowerShell rendering applies when Pi's `powershell` tool is enabled; Pi remains responsible for shell availability and command execution.
+- In the terminal, PowerShell rows are minimized even while the `powershell` tool is not enabled, such as calls in saved sessions; Pi remains responsible for enabling the tool, shell availability, and command execution.
 - Licensed under the Sustainable Use License 1.0 (`SUL-1.0`). See [LICENSE](LICENSE).

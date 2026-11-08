@@ -2,7 +2,7 @@
 // Copyright (c) 2026 caeloren
 
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { type ExtensionAPI, formatReadLineRange, ToolExecutionComponent, type ToolRenderers } from "@earendil-works/pi-coding-agent";
 import { type Component, getCapabilities, hyperlink, stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
@@ -29,7 +29,6 @@ const CODEMODE_STATUSES = new Set(["running", "ok", "error", "cancelled"] as con
 const NATIVE_RENDERER_TOUCHED = Symbol("minimal-tool-view.native-renderer-touched");
 const NATIVE_TIMING_PRIMED = Symbol("minimal-tool-view.native-timing-primed");
 const EDIT_CALL_COMPONENT = Symbol("minimal-tool-view.edit-call-component");
-const WRITE_LINE_COUNT = Symbol("minimal-tool-view.write-line-count");
 
 type RenderCall = NonNullable<ToolRenderers["renderCall"]>;
 type RenderResult = NonNullable<ToolRenderers["renderResult"]>;
@@ -64,7 +63,11 @@ class MinimalLineComponent implements Component {
 }
 
 // Keep distinct identities for Pi's call and result component slots.
-class MinimalCallComponent extends MinimalLineComponent {}
+class MinimalCallComponent extends MinimalLineComponent {
+	// Slot-local cache of the write line count, kept on the reused call component as Pi recommends for data
+	// that only one slot uses. A new call component (for example after an expanded view) counts afresh.
+	writeLineCount: WriteLineCount | undefined;
+}
 class MinimalResultComponent extends MinimalLineComponent {}
 
 type BackgroundFn = (text: string) => string;
@@ -151,13 +154,30 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function stringArg(args: unknown, ...names: string[]): string | undefined {
-	if (!isRecord(args)) return undefined;
-	for (const name of names) {
-		const value = args[name];
-		if (typeof value === "string") return value;
-	}
-	return undefined;
+function argValue(args: unknown, name: string): unknown {
+	return isRecord(args) ? args[name] : undefined;
+}
+
+// Read a text argument as Pi runs it: a string as supplied, and a number or boolean as the text that Pi's argument
+// validation converts it to before the tool runs. Missing or null is "" (not supplied). A value of any other type, such
+// as an object or array, is null: Pi rejects it, and its own renderers mark it as invalid.
+function textValue(value: unknown): string | null {
+	if (typeof value === "string") return value;
+	if (typeof value === "number" || typeof value === "boolean") return String(value);
+	return value == null ? "" : null;
+}
+
+// read, write and edit show file_path unless it is missing or null, and then path, as Pi's own renderers do. Pi's tools
+// run only path, so a file_path that is not a string is never converted and stays invalid, as in Pi's own views.
+function filePathArg(args: unknown): string | null {
+	const filePath = argValue(args, "file_path");
+	if (filePath == null) return textValue(argValue(args, "path"));
+	return typeof filePath === "string" ? filePath : null;
+}
+
+// Pi's own marker for a text argument that Pi rejects.
+function invalidArgText(theme: Theme): string {
+	return theme.fg("error", "[invalid arg]");
 }
 
 function numberArg(args: unknown, name: string): number | undefined {
@@ -167,9 +187,11 @@ function numberArg(args: unknown, name: string): number | undefined {
 	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+// Control and bidirectional-control characters and unpaired surrogates become U+FFFD. Pi measures an unpaired
+// surrogate as zero columns, but the terminal receives U+FFFD for it, so a fitted line would overflow.
 function sanitizeDisplayText(value: string): string {
 	return stripTerminalSequences(value)
-		.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, "\uFFFD");
+		.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069\uD800-\uDFFF]/gu, "\uFFFD");
 }
 
 function toSingleLine(value: string): string {
@@ -182,8 +204,9 @@ function compactOneLine(value: string): string {
 	return toSingleLine(value).trim();
 }
 
-// Search-pattern edge whitespace is meaningful. Test for blankness only after safe-text cleanup.
-function compactSearchPattern(value: string): string {
+// Edge whitespace is kept where Pi's own views show it: search patterns and limits. Test for blankness only after
+// safe-text cleanup.
+function compactKeepingEdges(value: string): string {
 	const text = toSingleLine(value);
 	return text.trim() ? text : "";
 }
@@ -193,21 +216,20 @@ interface WriteLineCount {
 	breaks: number;
 }
 
-function countTextLines(value: string | undefined, context: RenderContext): number {
-	const state = rendererState(context);
+function countTextLines(value: string, cache: MinimalCallComponent | undefined): number {
 	if (!value) {
-		if (state) delete state[WRITE_LINE_COUNT];
+		if (cache) cache.writeLineCount = undefined;
 		return 0;
 	}
 
-	const previous = state?.[WRITE_LINE_COUNT];
+	const previous = cache?.writeLineCount;
 	const last = value.charCodeAt(value.length - 1);
 	const finalLine = last === 10 || last === 13 ? 0 : 1;
 	if (previous?.content === value) return previous.breaks + finalLine;
 	let breaks = 0;
 	let start = 0;
 	// Compare the entire prefix, not just lengths. Replacements and shrinking inputs must recount.
-	// Retain only the current immutable string reference and its break count for this tool row.
+	// Retain only the current immutable string reference and its break count for this call component.
 	if (previous && value.length > previous.content.length && value.slice(0, previous.content.length) === previous.content) {
 		breaks = previous.breaks;
 		start = previous.content.length;
@@ -217,12 +239,8 @@ function countTextLines(value: string | undefined, context: RenderContext): numb
 		// Looking one code unit back also handles CRLF split across two argument updates.
 		if (code === 13 || (code === 10 && (i === 0 || value.charCodeAt(i - 1) !== 13))) breaks++;
 	}
-	if (state) state[WRITE_LINE_COUNT] = { content: value, breaks };
+	if (cache) cache.writeLineCount = { content: value, breaks };
 	return breaks + finalLine;
-}
-
-function displayPath(args: unknown): string {
-	return compactOneLine(stringArg(args, "file_path", "path") ?? "");
 }
 
 // Match Pi's native link-path normalization without probing the filesystem or importing private helpers.
@@ -236,10 +254,30 @@ function normalizeLinkPath(value: string): string {
 	return value.startsWith("file://") ? fileURLToPath(value) : value;
 }
 
-function formatLinkedPath(args: unknown, theme: Theme, context: RenderContext): string {
-	const raw = stringArg(args, "file_path", "path");
-	if (raw === undefined) return "";
-	const label = compactOneLine(raw);
+// Show an absolute path inside the home directory with `~` in its place, as Pi's own views do: the same resolved
+// comparison (case-insensitive on Windows) without probing the filesystem. Other paths are shown as supplied.
+function shortenHomePath(path: string): string {
+	try {
+		const home = homedir();
+		if (!home || !isAbsolute(path)) return path;
+		const key = (value: string) => (sep === "\\" ? resolve(value).toLowerCase() : resolve(value));
+		const homeKey = key(home);
+		const pathKey = key(path);
+		if (pathKey !== homeKey && !pathKey.startsWith(homeKey.endsWith(sep) ? homeKey : `${homeKey}${sep}`)) return path;
+		const rest = relative(home, path);
+		return rest ? `~${sep}${rest}` : "~";
+	} catch {
+		// An unavailable home directory must not prevent the call from being displayed.
+		return path;
+	}
+}
+
+// Callers pass the path argument Pi's own renderers read: filePathArg for read, write and edit, and only path for
+// ls, which ignores file_path. A path that Pi rejects shows Pi's invalid marker. The label may be shortened with
+// `~`; the link always targets the supplied path.
+function formatLinkedPath(raw: string | null, theme: Theme, context: RenderContext): string {
+	if (raw === null) return invalidArgText(theme);
+	const label = compactOneLine(shortenHomePath(raw));
 	if (!label) return "";
 	const text = theme.fg("accent", label);
 	if (!getCapabilities().hyperlinks || raw.trim() === "") return text;
@@ -268,82 +306,148 @@ function formatDuration(durationMs: number | undefined): string | undefined {
 	return `${Math.floor(minutes / 60)}h ${minutes % 60}m ${seconds}s`;
 }
 
-function formatShellCall(args: unknown, prompt: "$" | "PS>", theme: Theme): string {
-	const command = stringArg(args, "command") ?? "";
+function shellCommandPreview(command: string): string {
 	// Clean the whole command before taking its first meaningful line: terminal sequences may remove
 	// text, and VT/FF become visible replacements rather than whitespace.
 	const normalized = sanitizeDisplayText(command).replace(/\r\n?/g, "\n").trimStart();
 	const newline = normalized.indexOf("\n");
 	const firstLine = (newline === -1 ? normalized : normalized.slice(0, newline)).trimEnd();
 	const hasAdditionalContent = newline !== -1 && /\S/.test(normalized.slice(newline + 1));
-	const preview = firstLine ? ` ${firstLine}${hasAdditionalContent ? " ..." : ""}` : "";
+	return firstLine ? ` ${firstLine}${hasAdditionalContent ? " ..." : ""}` : "";
+}
+
+function formatShellCall(args: unknown, prompt: "$" | "PS>", theme: Theme): string {
+	const command = textValue(argValue(args, "command"));
+	// Pi's own call line shows its invalid marker after the prompt for a command that Pi rejects.
+	const preview = command === null ? ` ${invalidArgText(theme)}` : shellCommandPreview(command);
 	// Append a supplied timeout as Pi's own call line does; the whole line is then fitted to the width.
 	const timeout = numberArg(args, "timeout");
 	const timeoutText = timeout ? theme.fg("muted", ` (timeout ${timeout}s)`) : "";
 	return `${theme.fg("toolTitle", theme.bold(`${prompt}${preview}`))}${timeoutText}`;
 }
 
-// Show only supplied preview fields. Missing fields have no placeholder or inferred path.
-function formatCall(toolName: SupportedToolName, args: unknown, theme: Theme, context: RenderContext): string {
+// Pi has no renderer of its own for tool_search or the MCP resource tools; its generic view shows supplied
+// arguments as JSON. Strings are cleaned into one line (quoted when requested); other supplied values keep
+// that JSON form.
+function genericArgText(value: unknown, quoteString: boolean): string {
+	if (typeof value === "string") {
+		const text = compactOneLine(value);
+		return text && quoteString ? JSON.stringify(text) : text;
+	}
+	return value == null ? "" : compactOneLine(JSON.stringify(value) ?? String(value));
+}
+
+// A text argument of tool_search or an MCP resource tool is shown as Pi runs it (see textValue); a value that Pi
+// rejects keeps the generic view's JSON form.
+function genericTextArg(args: unknown, name: string, quoteString: boolean): string {
+	const value = argValue(args, name);
+	return genericArgText(textValue(value) ?? value, quoteString);
+}
+
+// tool_search shows a supplied limit as Pi's generic view does: as the JSON of the value, whatever its type. Missing,
+// null and blank limits stay empty.
+function genericLimitText(args: unknown): string {
+	const limit = argValue(args, "limit");
+	if (limit == null || (typeof limit === "string" && !compactOneLine(limit))) return "";
+	return compactOneLine(JSON.stringify(limit) ?? String(limit));
+}
+
+// find and grep: Pi's invalid marker for a pattern or path that Pi rejects; otherwise the cleaned pattern, styled by
+// the caller, and the search path with the home directory shown as `~`.
+function searchPattern(args: unknown, theme: Theme, style: (pattern: string) => string): string {
+	const raw = textValue(argValue(args, "pattern"));
+	if (raw === null) return invalidArgText(theme);
+	const pattern = compactKeepingEdges(raw);
+	return pattern ? style(pattern) : "";
+}
+
+function searchPath(args: unknown, theme: Theme): string {
+	const raw = textValue(argValue(args, "path"));
+	return raw === null ? invalidArgText(theme) : compactOneLine(shortenHomePath(raw));
+}
+
+// find, grep and ls show a supplied limit as Pi's own views do: as text, whatever its type, edge spaces included.
+// Converting it as Pi does also keeps Pi's handling of a value that cannot become text: the renderer throws, and Pi
+// shows its fallback view. Missing, null and blank limits stay empty.
+function limitText(args: unknown): string {
+	const limit = argValue(args, "limit");
+	return limit == null ? "" : compactKeepingEdges(String(limit));
+}
+
+// Show only supplied preview fields. Missing fields have no placeholder or inferred path; text arguments are read by
+// textValue, and values that Pi rejects follow Pi's own call lines.
+function formatCall(
+	toolName: SupportedToolName,
+	args: unknown,
+	theme: Theme,
+	context: RenderContext,
+	callComponent?: MinimalCallComponent,
+): string {
 	if (toolName === "bash") return formatShellCall(args, "$", theme);
 	if (toolName === "powershell") return formatShellCall(args, "PS>", theme);
 	const title = theme.fg("toolTitle", theme.bold(toolName));
 	switch (toolName) {
 		case "codemode":
-			return title;
+			// The source stays hidden; only a value that Pi rejects shows Pi's invalid marker.
+			return textValue(argValue(args, "code")) === null ? `${title} ${invalidArgText(theme)}` : title;
 		case "list_mcp_resources":
 		case "list_mcp_resource_templates":
 		case "read_mcp_resource": {
 			const keys = toolName === "read_mcp_resource" ? ["server", "uri"] : ["server", "cursor"];
 			const fields = keys.flatMap((key) => {
-				const value = compactOneLine(stringArg(args, key) ?? "");
-				return value ? [`${key}=${JSON.stringify(value)}`] : [];
+				const value = genericTextArg(args, key, true);
+				return value ? [`${key}=${value}`] : [];
 			});
 			return `${title}${fields.length ? ` ${theme.fg("muted", fields.join(" "))}` : ""}`;
 		}
 		case "tool_search": {
-			const query = compactOneLine(stringArg(args, "query") ?? "");
-			const limit = numberArg(args, "limit");
-			const suffix = limit === undefined ? "" : theme.fg("muted", ` (limit ${limit})`);
-			return `${title}${query ? ` ${theme.fg("accent", query)}` : ""}${suffix}`;
+			// Muted, like the arguments in Pi's generic view; the limit is shown as that view shows it.
+			const query = genericTextArg(args, "query", false);
+			const limit = genericLimitText(args);
+			const suffix = limit ? theme.fg("muted", ` (limit ${limit})`) : "";
+			return `${title}${query ? ` ${theme.fg("muted", query)}` : ""}${suffix}`;
 		}
 		case "read": {
-			const path = formatLinkedPath(args, theme, context);
+			const path = formatLinkedPath(filePathArg(args), theme, context);
 			// Preserve omitted versus malformed values for Pi's public range formatter.
 			const lineRange = isRecord(args) ? formatReadLineRange(args.offset, args.limit) : "";
 			const range = lineRange ? theme.fg("warning", lineRange) : "";
 			return `${title}${path || range ? ` ${path}${range}` : ""}`;
 		}
 		case "write": {
-			const path = formatLinkedPath(args, theme, context);
-			const lineCount = countTextLines(stringArg(args, "content"), context);
-			const lineInfo = lineCount > 0 ? theme.fg("muted", ` (${lineCount} ${plural(lineCount, "line")})`) : "";
+			const path = formatLinkedPath(filePathArg(args), theme, context);
+			const content = textValue(argValue(args, "content"));
+			const lineCount = countTextLines(content ?? "", callComponent);
+			let lineInfo = lineCount > 0 ? theme.fg("muted", ` (${lineCount} ${plural(lineCount, "line")})`) : "";
+			// Content that Pi rejects shows Pi's own marker in place of the line count.
+			if (content === null) lineInfo = ` ${theme.fg("error", "[invalid content arg - expected string]")}`;
 			return `${title}${path ? ` ${path}` : ""}${lineInfo}`;
 		}
 		case "edit": {
-			const path = formatLinkedPath(args, theme, context);
+			const path = formatLinkedPath(filePathArg(args), theme, context);
 			return `${title}${path ? ` ${path}` : ""}`;
 		}
 		case "find": {
-			const pattern = compactSearchPattern(stringArg(args, "pattern") ?? "");
-			const path = displayPath(args);
-			const limit = numberArg(args, "limit");
-			const suffix = limit === undefined ? "" : theme.fg("toolOutput", ` (limit ${limit})`);
-			return `${title}${pattern ? ` ${theme.fg("accent", pattern)}` : ""}${path ? theme.fg("toolOutput", ` in ${path}`) : ""}${suffix}`;
+			const pattern = searchPattern(args, theme, (value) => theme.fg("accent", value));
+			const path = searchPath(args, theme);
+			const limit = limitText(args);
+			const suffix = limit ? theme.fg("toolOutput", ` (limit ${limit})`) : "";
+			return `${title}${pattern ? ` ${pattern}` : ""}${path ? theme.fg("toolOutput", ` in ${path}`) : ""}${suffix}`;
 		}
 		case "grep": {
-			const pattern = compactSearchPattern(stringArg(args, "pattern") ?? "");
-			const path = displayPath(args);
-			const glob = compactOneLine(stringArg(args, "glob") ?? "");
-			const limit = numberArg(args, "limit");
+			const pattern = searchPattern(args, theme, (value) => theme.fg("accent", `/${value}/`));
+			const path = searchPath(args, theme);
+			// A glob that Pi rejects is omitted, as in Pi's own view.
+			const glob = compactOneLine(textValue(argValue(args, "glob")) ?? "");
+			const limit = limitText(args);
 			let suffix = glob ? theme.fg("toolOutput", ` (${glob})`) : "";
-			if (limit !== undefined) suffix += theme.fg("toolOutput", ` limit ${limit}`);
-			return `${title}${pattern ? ` ${theme.fg("accent", `/${pattern}/`)}` : ""}${path ? theme.fg("toolOutput", ` in ${path}`) : ""}${suffix}`;
+			if (limit) suffix += theme.fg("toolOutput", ` limit ${limit}`);
+			return `${title}${pattern ? ` ${pattern}` : ""}${path ? theme.fg("toolOutput", ` in ${path}`) : ""}${suffix}`;
 		}
 		case "ls": {
-			const path = formatLinkedPath(args, theme, context);
-			const limit = numberArg(args, "limit");
-			const suffix = limit === undefined ? "" : theme.fg("toolOutput", ` (limit ${limit})`);
+			const path = formatLinkedPath(textValue(argValue(args, "path")), theme, context);
+			const limit = limitText(args);
+			const suffix = limit ? theme.fg("toolOutput", ` (limit ${limit})`) : "";
 			return `${title}${path ? ` ${path}` : ""}${suffix}`;
 		}
 	}
@@ -413,7 +517,8 @@ function formatResult(
 	}
 
 	const duration = options.isPartial ? undefined : formatDuration(context.durationMs);
-	if (duration) text += theme.fg("dim", ` · ${duration}`);
+	// Muted, as Pi's own views show a duration.
+	if (duration) text += theme.fg("muted", ` · ${duration}`);
 	return text;
 }
 
@@ -427,7 +532,6 @@ interface MinimalRendererState {
 	[NATIVE_RENDERER_TOUCHED]?: boolean;
 	[NATIVE_TIMING_PRIMED]?: boolean;
 	[EDIT_CALL_COMPONENT]?: MinimalEditCallComponent;
-	[WRITE_LINE_COUNT]?: WriteLineCount;
 }
 
 function rendererState(context: RenderContext): MinimalRendererState | undefined {
@@ -564,6 +668,8 @@ export function createMinimalToolViewRenderers(toolName: SupportedToolName, nati
 			if (preserveNativeTiming && state && context.executionStarted && context.isPartial && !state[NATIVE_TIMING_PRIMED]) {
 				// Initialize the native clock once, not at first expansion. The call callback records
 				// timing without starting a periodic redraw; never send hidden partial-result updates.
+				// The flag is row state, not part of the call component, because it must survive the
+				// switch to the native component while the row is expanded and back.
 				state[NATIVE_TIMING_PRIMED] = true;
 				setNativeRendererTouched(context, true);
 				if (!context.expanded) {
@@ -576,9 +682,6 @@ export function createMinimalToolViewRenderers(toolName: SupportedToolName, nati
 				}
 			}
 			if (context.expanded) {
-				if (toolName === "write") {
-					if (state) delete state[WRITE_LINE_COUNT];
-				}
 				if (selfFramedEdit) {
 					if (state) delete state[EDIT_CALL_COMPONENT];
 				}
@@ -605,7 +708,7 @@ export function createMinimalToolViewRenderers(toolName: SupportedToolName, nati
 
 			const component =
 				context.lastComponent instanceof MinimalCallComponent ? context.lastComponent : new MinimalCallComponent();
-			component.setText(formatCall(toolName, args, theme, context));
+			component.setText(formatCall(toolName, args, theme, context, component));
 			return component;
 		},
 		renderResult(result, options, theme, context) {
